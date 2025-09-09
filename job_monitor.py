@@ -32,55 +32,150 @@ class JobBoardMonitor:
         self.job_history = self.load_job_history()
         self.new_jobs = []
         
-        # Job board configurations - simplified version
+        # Updated job board configurations with better selectors
         self.job_boards = {
             'Google': {
                 'url': 'https://www.google.com/about/careers/applications/jobs/results/?location=United%20States&sort_by=date&q=product%2C%20program%2C%20project',
-                'selector': 'h2.gc-card__title'
+                'selectors': [
+                    'li[class*="job"]',
+                    'div[class*="job-item"]',
+                    'div[class*="gc-card"]',
+                    'a[href*="/jobs/results/"]',
+                    'div[role="listitem"]'
+                ],
+                'wait_for': 5000
             },
             'Apple': {
                 'url': 'https://jobs.apple.com/en-us/search?sort=newest&key=Product%25252C%252520Program%25252C%252520Project&location=united-states-USA',
-                'selector': 'tbody.table-tbody tr'
+                'selectors': [
+                    'tbody.table-tbody tr[role="row"]',
+                    'tr.table-row',
+                    'a[id*="job-"]',
+                    'div[class*="job-"]'
+                ],
+                'wait_for': 5000
             },
             'Netflix': {
                 'url': 'https://explore.jobs.netflix.net/careers?pid=790301701184&Region=ucan&domain=netflix.com&sort_by=new',
-                'selector': '[data-card-type="job"]'
+                'selectors': [
+                    'a[data-card-type="job"]',
+                    'div[class*="job-card"]',
+                    'article[class*="job"]',
+                    'div.position',
+                    'li[class*="position"]'
+                ],
+                'wait_for': 5000
             },
             'Tesla': {
                 'url': 'https://www.tesla.com/careers/search/?region=5&site=US&type=1',
-                'selector': 'tr.table-row'
+                'selectors': [
+                    'tr.tds-table-row',
+                    'tr[class*="table-row"]',
+                    'a[href*="/careers/"]',
+                    'tbody tr'
+                ],
+                'wait_for': 5000
             },
             'Amazon': {
                 'url': 'https://www.amazon.jobs/en/search?offset=0&result_limit=10&sort=recent&job_type%5B%5D=Full-Time&country%5B%5D=USA&state%5B%5D=New%20York&state%5B%5D=New%20Jersey',
-                'selector': 'div.job-tile'
+                'selectors': [
+                    'div.job-tile',
+                    'div[class*="job-tile"]'
+                ],
+                'wait_for': 3000
             },
             'Meta': {
                 'url': 'https://www.metacareers.com/jobs',
-                'selector': 'a[href*="/jobs/"]'
+                'selectors': [
+                    'a[href*="/jobs/"]',
+                    'div[class*="job-card"]'
+                ],
+                'wait_for': 3000
             },
             'Microsoft': {
                 'url': 'https://jobs.careers.microsoft.com/global/en/search?q=%22product%22%20OR%20%22project%22%20OR%20%22program%22&lc=United%20States&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Recent&flt=true',
-                'selector': 'div.ms-List-cell'
+                'selectors': [
+                    'div.ms-List-cell',
+                    'div[data-automation-id="job"]'
+                ],
+                'wait_for': 3000
             },
             'NVIDIA': {
                 'url': 'https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite?q=product,%20program,%20project',
-                'selector': 'li[data-automation-id="jobItem"]'
+                'selectors': [
+                    'li[data-automation-id="jobItem"]',
+                    'div[data-automation-id="jobItem"]',
+                    'a[data-automation-id="jobTitle"]',
+                    'div[role="listitem"]'
+                ],
+                'wait_for': 7000
             },
             'Stripe': {
                 'url': 'https://stripe.com/jobs/search?office_locations=North+America--New+York',
-                'selector': 'a.JobsListings__link'
+                'selectors': [
+                    'a.JobsListings__link',
+                    'a[class*="JobsListings"]'
+                ],
+                'wait_for': 3000
             },
             'OpenAI': {
                 'url': 'https://openai.com/careers/search/',
-                'selector': 'li'
+                'selectors': [
+                    'a[href*="/careers/"]',
+                    'div[class*="job"]',
+                    'li[class*="career"]',
+                    'div.opening',
+                    'article'
+                ],
+                'wait_for': 5000
             },
             'Anthropic': {
                 'url': 'https://boards.greenhouse.io/anthropic',
-                'selector': 'div.opening'
+                'selectors': [
+                    'div.opening',
+                    'div[class*="opening"]',
+                    'a[href*="/anthropic/jobs/"]'
+                ],
+                'wait_for': 3000
             },
             'SpaceX': {
                 'url': 'https://www.spacex.com/careers/jobs/',
-                'selector': 'div[id*="job"]'
+                'selectors': [
+                    'div[id*="job"]',
+                    'tr[class*="job"]',
+                    'div.opening',
+                    'a[href*="/careers/"]',
+                    'li[class*="job"]'
+                ],
+                'wait_for': 5000
+            },
+            # Additional companies from your list
+            'Waymo': {
+                'url': 'https://careers.withwaymo.com/jobs/search?page=1&query=project%2C+program%2C+product',
+                'selectors': [
+                    'div[data-testid="job-card"]',
+                    'a[href*="/jobs/"]',
+                    'div[class*="job-card"]'
+                ],
+                'wait_for': 5000
+            },
+            'Uber': {
+                'url': 'https://www.uber.com/us/en/careers/list/?location=USA-New%20York',
+                'selectors': [
+                    'a[data-baseweb="link"]',
+                    'div[class*="job"]',
+                    'a[href*="/careers/"]'
+                ],
+                'wait_for': 5000
+            },
+            'Two Sigma': {
+                'url': 'https://careers.twosigma.com/careers/OpenRoles',
+                'selectors': [
+                    'div.job-result',
+                    'tr[class*="job"]',
+                    'a[href*="JobDetail"]'
+                ],
+                'wait_for': 5000
             }
         }
     
@@ -167,7 +262,7 @@ class JobBoardMonitor:
             logger.error(f"Error saving job history: {e}")
     
     def scrape_job_board(self, company: str, config: Dict) -> List[str]:
-        """Scrape job board using Playwright"""
+        """Scrape job board using Playwright with multiple selector fallbacks"""
         jobs = []
         try:
             logger.info(f"Checking {company}...")
@@ -176,65 +271,109 @@ class JobBoardMonitor:
                 # Launch browser
                 browser = p.chromium.launch(
                     headless=True,
-                    args=['--no-sandbox', '--disable-setuid-sandbox']
+                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
                 )
-                page = browser.new_page()
                 
-                # Set a realistic user agent
-                page.set_extra_http_headers({
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                })
+                context = browser.new_context(
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                )
+                
+                page = context.new_page()
                 
                 # Navigate to the page
                 logger.info(f"Loading {company} careers page...")
                 page.goto(config['url'], wait_until='domcontentloaded', timeout=30000)
                 
-                # Wait a bit for dynamic content
-                page.wait_for_timeout(3000)
+                # Wait for content to load
+                wait_time = config.get('wait_for', 5000)
+                page.wait_for_timeout(wait_time)
                 
-                # Try to click "View More" or "Load More" buttons if they exist
+                # Try to handle cookie banners or popups
                 try:
-                    for _ in range(2):  # Try clicking twice
-                        view_more = page.locator('button:has-text("View More"), button:has-text("Load More"), button:has-text("Show More")')
-                        if view_more.count() > 0:
-                            view_more.first.click()
-                            page.wait_for_timeout(2000)
+                    # Common cookie/popup selectors
+                    popup_selectors = [
+                        'button:has-text("Accept")',
+                        'button:has-text("OK")',
+                        'button:has-text("Got it")',
+                        'button[aria-label*="close"]',
+                        'button[aria-label*="dismiss"]'
+                    ]
+                    for selector in popup_selectors:
+                        if page.locator(selector).count() > 0:
+                            page.locator(selector).first.click()
+                            page.wait_for_timeout(1000)
+                            break
+                except:
+                    pass
+                
+                # Try to click "View More" or "Load More" buttons
+                try:
+                    for _ in range(2):
+                        load_more_selectors = [
+                            'button:has-text("View More")',
+                            'button:has-text("Load More")',
+                            'button:has-text("Show More")',
+                            'a:has-text("View More")',
+                            'button[aria-label*="load more"]'
+                        ]
+                        for selector in load_more_selectors:
+                            if page.locator(selector).count() > 0:
+                                page.locator(selector).first.click()
+                                page.wait_for_timeout(2000)
+                                break
                 except:
                     pass
                 
                 # Scroll to load more content
-                for _ in range(2):
+                for _ in range(3):
                     page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
                     page.wait_for_timeout(1500)
                 
-                # Extract job listings
-                elements = page.locator(config['selector']).all()
-                logger.info(f"Found {len(elements)} job elements for {company}")
+                # Try multiple selectors
+                selectors = config.get('selectors', [config.get('selector', '')])
+                elements_found = False
                 
-                for idx, element in enumerate(elements[:30]):  # Limit to 30 jobs
+                for selector in selectors:
                     try:
-                        job_text = element.text_content()
-                        if job_text and len(job_text) > 5:  # Basic validation
-                            job_id = hashlib.md5(f"{company}_{job_text}".encode()).hexdigest()
-                            jobs.append(job_id)
+                        elements = page.locator(selector).all()
+                        if elements:
+                            logger.info(f"Found {len(elements)} job elements for {company} using selector: {selector}")
+                            elements_found = True
                             
-                            # Check if this is a new job
-                            if company not in self.job_history:
-                                self.job_history[company] = []
-                            
-                            if job_id not in self.job_history[company]:
-                                # Extract clean job title
-                                job_title = job_text.strip()[:100]  # First 100 chars
-                                self.new_jobs.append({
-                                    'company': company,
-                                    'job_title': job_title,
-                                    'url': config['url'],
-                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
-                                })
-                                logger.info(f"NEW JOB: {company} - {job_title}")
+                            for idx, element in enumerate(elements[:30]):
+                                try:
+                                    job_text = element.text_content()
+                                    if job_text and len(job_text) > 5:
+                                        job_id = hashlib.md5(f"{company}_{job_text}".encode()).hexdigest()
+                                        jobs.append(job_id)
+                                        
+                                        # Check if this is a new job
+                                        if company not in self.job_history:
+                                            self.job_history[company] = []
+                                        
+                                        if job_id not in self.job_history[company]:
+                                            job_title = job_text.strip()[:100]
+                                            self.new_jobs.append({
+                                                'company': company,
+                                                'job_title': job_title,
+                                                'url': config['url'],
+                                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
+                                            })
+                                            logger.info(f"NEW JOB: {company} - {job_title}")
+                                except Exception as e:
+                                    logger.debug(f"Error processing element {idx}: {e}")
+                                    continue
+                            break  # Exit selector loop if we found elements
                     except Exception as e:
-                        logger.debug(f"Error processing element {idx}: {e}")
+                        logger.debug(f"Selector {selector} failed: {e}")
                         continue
+                
+                if not elements_found:
+                    logger.warning(f"No job elements found for {company} with any selector")
+                    # Log page title to verify we're on the right page
+                    page_title = page.title()
+                    logger.info(f"Page title for {company}: {page_title}")
                 
                 browser.close()
                 
@@ -261,6 +400,8 @@ class JobBoardMonitor:
                     self.job_history[company].extend(list(new_job_ids))
                     # Keep only last 200 job IDs per company
                     self.job_history[company] = self.job_history[company][-200:]
+                else:
+                    logger.info(f"No new jobs found at {company}")
                 
                 # Rate limiting
                 time.sleep(3)
@@ -290,6 +431,7 @@ class JobBoardMonitor:
                 <style>
                     body {{ font-family: Arial, sans-serif; padding: 20px; }}
                     h2 {{ color: #2c3e50; }}
+                    .summary {{ background: #e8f4f8; padding: 15px; border-radius: 5px; margin: 20px 0; }}
                     .job {{ margin: 15px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background: #f9f9f9; }}
                     .company {{ font-weight: bold; color: #2c3e50; font-size: 16px; }}
                     .job-title {{ color: #34495e; margin: 8px 0; }}
@@ -300,7 +442,10 @@ class JobBoardMonitor:
             </head>
             <body>
                 <h2>🚀 New Job Postings Alert</h2>
-                <p>Found {len(self.new_jobs)} new job postings:</p>
+                <div class="summary">
+                    <strong>Total new jobs found: {len(self.new_jobs)}</strong><br>
+                    Check time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                </div>
             """
             
             # Group jobs by company
@@ -310,7 +455,7 @@ class JobBoardMonitor:
                     jobs_by_company[job['company']] = []
                 jobs_by_company[job['company']].append(job)
             
-            for company, jobs in jobs_by_company.items():
+            for company, jobs in sorted(jobs_by_company.items()):
                 html_body += f"""
                 <div class="job">
                     <div class="company">🏢 {company} ({len(jobs)} new jobs)</div>
@@ -318,6 +463,10 @@ class JobBoardMonitor:
                 for job in jobs[:5]:  # Show max 5 jobs per company
                     html_body += f"""
                     <div class="job-title">• {job['job_title']}</div>
+                    """
+                if len(jobs) > 5:
+                    html_body += f"""
+                    <div class="job-title">... and {len(jobs) - 5} more</div>
                     """
                 html_body += f"""
                     <div><a href="{jobs[0]['url']}">View All {company} Jobs →</a></div>
@@ -329,7 +478,8 @@ class JobBoardMonitor:
                 <hr>
                 <p style="color: #7f8c8d; font-size: 12px;">
                     This is an automated notification from your Job Board Monitor.<br>
-                    Checking frequency: Every hour
+                    Checking frequency: Every hour<br>
+                    Companies monitored: 15
                 </p>
             </body>
             </html>
@@ -355,6 +505,7 @@ class JobBoardMonitor:
         logger.info("="*50)
         logger.info("Starting Job Board Monitor")
         logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Monitoring {len(self.job_boards)} companies")
         logger.info("="*50)
         
         # Check all boards
