@@ -383,7 +383,7 @@ class JobBoardMonitor:
         return True
     
     def scrape_job_board(self, company: str, config: Dict) -> List[Tuple[str, str]]:
-        """Scrape job board using Playwright with multiple selector fallbacks"""
+        """Scrape job board using Playwright with pagination support"""
         jobs = []
         try:
             logger.info(f"Checking {company}...")
@@ -431,82 +431,127 @@ class JobBoardMonitor:
                 except:
                     pass
                 
-                # Try to click "View More" or "Load More" buttons if configured
-                if config.get('scroll'):
-                    try:
-                        for _ in range(2):
-                            load_more_selectors = [
-                                'button:has-text("View More")',
-                                'button:has-text("Load More")',
-                                'button:has-text("Show More")',
-                                'a:has-text("View More")'
-                            ]
-                            for selector in load_more_selectors:
-                                if page.locator(selector).count() > 0:
-                                    page.locator(selector).first.click()
-                                    page.wait_for_timeout(2000)
-                                    break
-                    except:
-                        pass
+                # Handle pagination - check up to 5 pages or until no more jobs found
+                pages_checked = 0
+                max_pages = 5
+                
+                while pages_checked < max_pages:
+                    pages_checked += 1
+                    logger.info(f"Checking page {pages_checked} for {company}")
                     
-                    # Scroll to load more content
-                    for _ in range(3):
-                        page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                        page.wait_for_timeout(1500)
-                
-                # Try multiple selectors
-                selectors = config.get('selectors', [])
-                elements_found = False
-                
-                for selector in selectors:
-                    try:
-                        elements = page.locator(selector).all()
-                        if elements:
-                            logger.info(f"Found {len(elements)} job elements for {company} using selector: {selector}")
-                            elements_found = True
+                    # Try to click "View More" or "Load More" buttons if configured
+                    if config.get('scroll'):
+                        try:
+                            for _ in range(3):  # Try clicking multiple times
+                                load_more_selectors = [
+                                    'button:has-text("View More")',
+                                    'button:has-text("Load More")',
+                                    'button:has-text("Show More")',
+                                    'button:has-text("Load more")',
+                                    'a:has-text("View More")',
+                                    'button[aria-label*="load more"]'
+                                ]
+                                clicked = False
+                                for selector in load_more_selectors:
+                                    if page.locator(selector).count() > 0 and page.locator(selector).first.is_visible():
+                                        page.locator(selector).first.click()
+                                        page.wait_for_timeout(2000)
+                                        clicked = True
+                                        break
+                                if not clicked:
+                                    break
+                        except:
+                            pass
+                        
+                        # Scroll to load more content
+                        for _ in range(3):
+                            page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                            page.wait_for_timeout(1500)
+                    
+                    # Try multiple selectors
+                    selectors = config.get('selectors', [])
+                    page_jobs_found = False
+                    
+                    for selector in selectors:
+                        try:
+                            elements = page.locator(selector).all()
+                            if elements:
+                                logger.info(f"Found {len(elements)} job elements for {company} on page {pages_checked}")
+                                page_jobs_found = True
+                                
+                                for idx, element in enumerate(elements):
+                                    try:
+                                        job_text = element.text_content()
+                                        if job_text and len(job_text) > 5 and not self.is_junk_text(job_text):
+                                            job_id = self.extract_job_id(job_text, company)
+                                            
+                                            # Check if we've already seen this job
+                                            if job_id in [j[0] for j in jobs]:
+                                                continue  # Skip duplicate
+                                            
+                                            job_title = job_text.strip()[:100]
+                                            jobs.append((job_id, job_title))
+                                            
+                                            # Check if this is a new job
+                                            if company not in self.job_history:
+                                                self.job_history[company] = {}
+                                            
+                                            if job_id not in self.job_history[company]:
+                                                self.job_history[company][job_id] = {
+                                                    'title': job_title,
+                                                    'first_seen': datetime.now().isoformat()
+                                                }
+                                            
+                                            if self.is_truly_new_job(job_id, company):
+                                                self.new_jobs.append({
+                                                    'company': company,
+                                                    'job_title': job_title,
+                                                    'url': config['url'],
+                                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
+                                                })
+                                                logger.info(f"NEW JOB: {company} - {job_title}")
+                                    except Exception as e:
+                                        logger.debug(f"Error processing element {idx}: {e}")
+                                        continue
+                                break  # Exit selector loop if we found elements
+                        except Exception as e:
+                            logger.debug(f"Selector {selector} failed: {e}")
+                            continue
+                    
+                    # Try to find and click "Next" button for pagination
+                    next_clicked = False
+                    if pages_checked < max_pages:
+                        try:
+                            next_selectors = [
+                                'a:has-text("Next")',
+                                'button:has-text("Next")',
+                                'a[aria-label*="Next"]',
+                                'button[aria-label*="Next"]',
+                                'a:has-text("→")',
+                                'button:has-text("→")',
+                                f'a:has-text("{pages_checked + 1}")',  # Page number
+                                f'button:has-text("{pages_checked + 1}")'
+                            ]
                             
-                            for idx, element in enumerate(elements[:30]):
-                                try:
-                                    job_text = element.text_content()
-                                    if job_text and len(job_text) > 5 and not self.is_junk_text(job_text):
-                                        job_id = self.extract_job_id(job_text, company)
-                                        job_title = job_text.strip()[:100]
-                                        jobs.append((job_id, job_title))
-                                        
-                                        # Check if this is a new job
-                                        if company not in self.job_history:
-                                            self.job_history[company] = {}
-                                        
-                                        if job_id not in self.job_history[company]:
-                                            self.job_history[company][job_id] = {
-                                                'title': job_title,
-                                                'first_seen': datetime.now().isoformat()
-                                            }
-                                        
-                                        if self.is_truly_new_job(job_id, company):
-                                            self.new_jobs.append({
-                                                'company': company,
-                                                'job_title': job_title,
-                                                'url': config['url'],
-                                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
-                                            })
-                                            logger.info(f"NEW JOB: {company} - {job_title}")
-                                except Exception as e:
-                                    logger.debug(f"Error processing element {idx}: {e}")
-                                    continue
-                            break  # Exit selector loop if we found elements
-                    except Exception as e:
-                        logger.debug(f"Selector {selector} failed: {e}")
-                        continue
+                            for selector in next_selectors:
+                                if page.locator(selector).count() > 0 and page.locator(selector).first.is_visible():
+                                    page.locator(selector).first.click()
+                                    page.wait_for_timeout(3000)
+                                    next_clicked = True
+                                    logger.info(f"Navigated to page {pages_checked + 1} for {company}")
+                                    break
+                        except:
+                            pass
+                    
+                    # If no next button clicked and no jobs found on this page, stop pagination
+                    if not next_clicked and not page_jobs_found:
+                        logger.info(f"No more pages to check for {company}")
+                        break
                 
-                if not elements_found:
-                    logger.warning(f"No job elements found for {company} with any selector")
-                    # Log page title to verify we're on the right page
-                    try:
-                        page_title = page.title()
-                        logger.info(f"Page title for {company}: {page_title}")
-                    except:
-                        pass
+                if not jobs:
+                    logger.warning(f"No job elements found for {company} after checking {pages_checked} pages")
+                else:
+                    logger.info(f"Total jobs found for {company}: {len(jobs)} across {pages_checked} pages")
                 
                 browser.close()
                 
@@ -516,24 +561,38 @@ class JobBoardMonitor:
         return jobs
     
     def scrape_greenhouse_api(self, company: str, board_token: str) -> List[Tuple[str, str]]:
-        """Scrape Greenhouse boards using their public API"""
+        """Scrape Greenhouse boards using their public API - gets ALL jobs from ALL departments"""
         jobs = []
         try:
+            # First get all departments
+            departments_url = f'https://boards-api.greenhouse.io/v1/boards/{board_token}/departments'
+            response = requests.get(departments_url, timeout=10)
+            
+            department_ids = []
+            if response.status_code == 200:
+                data = response.json()
+                departments = data.get('departments', [])
+                logger.info(f"Found {len(departments)} departments for {company}")
+                for dept in departments:
+                    department_ids.append(dept.get('id'))
+            
+            # Get jobs from main API
             api_url = f'https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs'
             response = requests.get(api_url, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
                 job_list = data.get('jobs', [])
+                logger.info(f"Found {len(job_list)} total jobs for {company}")
                 
-                for job in job_list[:30]:
+                for job in job_list:
                     title = job.get('title', '')
                     job_id = str(job.get('id', ''))
                     location = job.get('location', {}).get('name', '')
                     
                     # Filter for US/relevant locations and keywords
-                    if any(loc in str(location) for loc in ['United States', 'USA', 'US', 'New York', 'San Francisco', 'Remote']):
-                        if any(keyword in title.lower() for keyword in ['product', 'program', 'project', 'manager']):
+                    if any(loc in str(location) for loc in ['United States', 'USA', 'US', 'New York', 'San Francisco', 'Remote', 'Seattle', 'Mountain View']):
+                        if any(keyword in title.lower() for keyword in ['product', 'program', 'project', 'manager', 'technical']):
                             unique_id = f"{company}_gh_{job_id}"
                             jobs.append((unique_id, title))
                             
@@ -555,6 +614,51 @@ class JobBoardMonitor:
                                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
                                 })
                                 logger.info(f"NEW JOB: {company} - {title}")
+            
+            # Also check each department specifically
+            for dept_id in department_ids[:10]:  # Check up to 10 departments
+                try:
+                    dept_url = f'https://boards-api.greenhouse.io/v1/boards/{board_token}/departments/{dept_id}/jobs'
+                    response = requests.get(dept_url, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        dept_jobs = data.get('jobs', [])
+                        for job in dept_jobs:
+                            title = job.get('title', '')
+                            job_id = str(job.get('id', ''))
+                            location = job.get('location', {}).get('name', '')
+                            
+                            unique_id = f"{company}_gh_{job_id}"
+                            # Check if we've already seen this job
+                            if unique_id in [j[0] for j in jobs]:
+                                continue
+                            
+                            if any(loc in str(location) for loc in ['United States', 'USA', 'US', 'New York', 'San Francisco', 'Remote', 'Seattle']):
+                                if any(keyword in title.lower() for keyword in ['product', 'program', 'project', 'manager', 'technical']):
+                                    jobs.append((unique_id, title))
+                                    
+                                    if company not in self.job_history:
+                                        self.job_history[company] = {}
+                                    
+                                    if unique_id not in self.job_history[company]:
+                                        self.job_history[company][unique_id] = {
+                                            'title': title,
+                                            'first_seen': datetime.now().isoformat()
+                                        }
+                                    
+                                    if self.is_truly_new_job(unique_id, company):
+                                        self.new_jobs.append({
+                                            'company': company,
+                                            'job_title': title,
+                                            'location': location,
+                                            'url': f'https://boards.greenhouse.io/{board_token}',
+                                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
+                                        })
+                                        logger.info(f"NEW JOB (from dept): {company} - {title}")
+                except:
+                    continue
+            
+            logger.info(f"Total unique jobs found for {company} via API: {len(jobs)}")
                                 
         except Exception as e:
             logger.error(f"Error fetching {company} Greenhouse API: {e}")
