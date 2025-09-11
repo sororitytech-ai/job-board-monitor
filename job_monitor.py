@@ -31,187 +31,180 @@ class JobBoardMonitor:
         self.gmail_password = os.environ.get('GMAIL_PASSWORD')
         self.gist_token = os.environ.get('GIST_TOKEN')
         self.job_history = self.load_job_history()
-        self.sent_jobs = self.load_sent_jobs()  # Track what we've already emailed
+        self.sent_jobs = self.load_sent_jobs()
         self.new_jobs = []
         
-        # Updated job board configurations with better selectors and methods
+        # Updated configurations with better selectors and API endpoints
         self.job_boards = {
             'Google': {
                 'url': 'https://www.google.com/about/careers/applications/jobs/results/?location=United%20States&sort_by=date&q=product%2C%20program%2C%20project',
                 'method': 'playwright',
                 'selectors': [
-                    'li[class*="job"]',
-                    'div[class*="job-item"]',
-                    'h2.gc-card__title',
-                    'a.gc-card__title-link',
-                    'div[role="listitem"]'
+                    'li.gc-card',
+                    'div.gc-card__container',
+                    'a.gc-card__title-link'
                 ],
-                'wait_for': 5000,
-                'scroll': True
+                'wait_for': 7000,
+                'scroll': True,
+                'pagination': True
             },
             'Intrinsic': {
                 'url': 'https://boards.greenhouse.io/intrinsic',
-                'method': 'playwright',
-                'selectors': ['div.opening a'],
-                'wait_for': 3000
+                'method': 'api',
+                'api_token': 'intrinsic',
+                'fallback_selectors': ['div.opening a']
             },
             'Waymo': {
                 'url': 'https://careers.withwaymo.com/jobs/search?page=1&query=project%2C+program%2C+product',
                 'method': 'playwright',
                 'selectors': [
-                    'div[data-testid="job-card"] h3',
-                    'a[href*="/jobs/"] h3',
-                    'h3'
+                    'a[data-testid="job-title"]',
+                    'h3[data-testid="job-title"]',
+                    'div.job-card h3'
                 ],
-                'wait_for': 5000
+                'wait_for': 6000,
+                'pagination': True
             },
             'Wing': {
                 'url': 'https://wing.com/careers',
                 'method': 'playwright',
                 'selectors': [
-                    'div.job-listing h3',
-                    'div.careers-listing h3',
-                    'a[href*="job"] h3'
+                    'div.careers-section a[href*="/careers/"]',
+                    'div.job-card',
+                    'h3.job-title'
                 ],
-                'wait_for': 5000
+                'wait_for': 6000,
+                'scroll': True
             },
             'X Moonshot': {
                 'url': 'https://x.company/careers/',
                 'method': 'playwright',
                 'selectors': [
+                    'a.job-listing-link',
                     'div.job-listing h3',
-                    'a[href*="careers"] h3',
-                    'h3.job-title'
+                    'article.job-card h3'
                 ],
-                'wait_for': 5000
+                'wait_for': 6000,
+                'scroll': True
             },
             'Apple': {
                 'url': 'https://jobs.apple.com/en-us/search?sort=newest&key=Product%25252C%252520Program%25252C%252520Project&location=united-states-USA',
                 'method': 'playwright',
                 'selectors': [
-                    'tbody.table-tbody tr[role="row"] td.table-col-1',
                     'td.table-col-1 a',
-                    'span.table-col-1-link'
+                    'span[id*="job-title"]',
+                    'a[id*="job-link"]'
                 ],
-                'wait_for': 5000,
-                'scroll': True
+                'wait_for': 7000,
+                'scroll': True,
+                'pagination': True
             },
             'NVIDIA': {
                 'url': 'https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite?q=product,%20program,%20project',
                 'method': 'playwright',
                 'selectors': [
                     'a[data-automation-id="jobTitle"]',
-                    'div[data-automation-id="promptOption"]'
+                    'h3[data-automation-id="jobTitle"]'
                 ],
-                'wait_for': 7000
+                'wait_for': 8000,
+                'pagination': True
             },
             'Netflix': {
-                'url': 'https://explore.jobs.netflix.net/careers?pid=790301701184&Region=ucan&domain=netflix.com&sort_by=new',
-                'method': 'playwright',
-                'selectors': [
-                    'a[data-card-type="job"]',
-                    'div[data-card-type="job"]',
-                    'article[class*="job"]'
-                ],
-                'wait_for': 5000,
-                'scroll': True
+                'url': 'https://jobs.netflix.com/',
+                'method': 'api',
+                'api_token': 'netflix',
+                'fallback_url': 'https://explore.jobs.netflix.net/careers?pid=790301701184&domain=netflix.com&sort_by=new'
             },
             'Anthropic': {
                 'url': 'https://boards.greenhouse.io/anthropic',
-                'method': 'playwright',
-                'selectors': ['div.opening a'],
-                'wait_for': 3000
+                'method': 'api',
+                'api_token': 'anthropic',
+                'fallback_selectors': ['div.opening a']
             },
             'Tesla': {
                 'url': 'https://www.tesla.com/careers/search/?region=5&site=US&type=1',
                 'method': 'playwright',
                 'selectors': [
-                    'tr.tds-table-row td:first-child',
-                    'tbody tr td a'
+                    'tr.tds-table-row td:first-child a',
+                    'tbody tr td a[href*="/careers/"]'
                 ],
-                'wait_for': 5000,
-                'scroll': True
+                'wait_for': 8000,
+                'scroll': True,
+                'handle_cloudflare': True
             },
             'Amazon': {
                 'url': 'https://www.amazon.jobs/en/search?offset=0&result_limit=10&sort=recent&job_type%5B%5D=Full-Time&country%5B%5D=USA&state%5B%5D=New%20York&state%5B%5D=New%20Jersey',
                 'method': 'playwright',
                 'selectors': [
-                    'div.job-tile h3.job-title',
-                    'h3.job-title'
+                    'h3.job-title a',
+                    'div.job h3.job-title'
                 ],
-                'wait_for': 3000
+                'wait_for': 5000,
+                'pagination': True
             },
             'Meta': {
                 'url': 'https://www.metacareers.com/jobs',
                 'method': 'playwright',
                 'selectors': [
-                    'a[href*="/jobs/"] div[role="heading"]',
-                    'div._8sef',
-                    'div._8sel'
+                    'a[href*="/v2/jobs/"] div',
+                    'div[role="heading"]',
+                    'div._8sef a'
                 ],
-                'wait_for': 5000,
-                'scroll': True
+                'wait_for': 7000,
+                'scroll': True,
+                'pagination': True
             },
             'SpaceX': {
-                'url': 'https://www.spacex.com/careers/jobs/',
-                'method': 'playwright',
-                'selectors': [
-                    'div[id*="job"] h3',
-                    'tr[class*="job"] td',
-                    'a[href*="/careers/"] span'
-                ],
-                'wait_for': 5000,
-                'scroll': True
+                'url': 'https://www.spacex.com/careers/list',
+                'method': 'api',
+                'api_token': 'spacex',
+                'fallback_url': 'https://www.spacex.com/careers/jobs/'
             },
             'Stripe': {
                 'url': 'https://stripe.com/jobs/search?office_locations=North+America--New+York',
                 'method': 'playwright',
                 'selectors': [
-                    'a.JobsListings__link h3',
+                    'a.JobsListings__link span',
                     'h3.JobsListings__title'
                 ],
-                'wait_for': 3000
+                'wait_for': 5000
             },
             'Uber': {
                 'url': 'https://www.uber.com/us/en/careers/list/?location=USA-New%20York-New%20York&location=USA-New%20York-Bronx',
                 'method': 'playwright',
                 'selectors': [
-                    'a[data-baseweb="link"] h3',
-                    'div[data-baseweb] h3',
-                    'h3'
+                    'a[href*="/careers/list/"] h3',
+                    'h3[data-baseweb]'
                 ],
-                'wait_for': 5000,
-                'scroll': True
+                'wait_for': 7000,
+                'scroll': True,
+                'pagination': True
             },
             'Two Sigma': {
-                'url': 'https://careers.twosigma.com/careers/OpenRoles/%22product%22%20OR%20%22project%22%20OR%20%22program%22',
+                'url': 'https://careers.twosigma.com/careers/OpenRoles',
                 'method': 'playwright',
                 'selectors': [
-                    'div.job-result span.job-title',
+                    'span.job-title',
                     'a[href*="JobDetail"] span'
                 ],
-                'wait_for': 5000
+                'wait_for': 6000,
+                'scroll': True
             },
             'Microsoft': {
-                'url': 'https://jobs.careers.microsoft.com/global/en/search?q=%22product%22%20OR%20%22project%22%20OR%20%22program%22&lc=United%20States&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Recent&flt=true',
+                'url': 'https://jobs.careers.microsoft.com/global/en/search?q=%22product%22%20OR%20%22project%22%20OR%20%22program%22&lc=United%20States&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Recent',
                 'method': 'playwright',
                 'selectors': [
-                    'span[data-automation-id="jobTitle"]',
                     'h2[data-automation-id="jobTitle"]',
-                    'div.ms-List-cell'
+                    'span[data-automation-id="jobTitle"]'
                 ],
-                'wait_for': 5000
+                'wait_for': 6000,
+                'pagination': True
             },
             'OpenAI': {
                 'url': 'https://openai.com/careers/search/',
-                'method': 'playwright',
-                'selectors': [
-                    'li a[href*="/careers/"]',
-                    'div[class*="job"] h3',
-                    'article h3'
-                ],
-                'wait_for': 5000,
-                'scroll': True
+                'method': 'api',
+                'api_token': 'openai',
+                'fallback_selectors': ['a[href*="/careers/"] h3']
             }
         }
     
@@ -232,10 +225,8 @@ class JobBoardMonitor:
                         file_url = gist['files']['job_history.json']['raw_url']
                         history_response = requests.get(file_url)
                         data = history_response.json()
-                        # Clean old entries (older than 7 days)
                         return self.clean_old_jobs(data)
             
-            # Create new gist if not found
             return self.create_history_gist()
         except Exception as e:
             logger.error(f"Error loading job history: {e}")
@@ -257,8 +248,6 @@ class JobBoardMonitor:
                         file_url = gist['files']['sent_jobs.json']['raw_url']
                         history_response = requests.get(file_url)
                         return history_response.json()
-            
-            # Create new file if not found
             return {}
         except Exception as e:
             logger.error(f"Error loading sent jobs: {e}")
@@ -270,11 +259,7 @@ class JobBoardMonitor:
         cleaned_data = {}
         
         for company, jobs in job_data.items():
-            if isinstance(jobs, list):
-                # Legacy format - just keep last 100
-                cleaned_data[company] = jobs[-100:]
-            elif isinstance(jobs, dict):
-                # New format with timestamps
+            if isinstance(jobs, dict):
                 cleaned_jobs = {}
                 for job_id, job_info in jobs.items():
                     if 'first_seen' in job_info:
@@ -283,9 +268,13 @@ class JobBoardMonitor:
                             if first_seen > week_ago:
                                 cleaned_jobs[job_id] = job_info
                         except:
-                            # Keep if can't parse date
                             cleaned_jobs[job_id] = job_info
+                    else:
+                        cleaned_jobs[job_id] = job_info
                 cleaned_data[company] = cleaned_jobs
+            else:
+                # Legacy format
+                cleaned_data[company] = jobs[-100:] if isinstance(jobs, list) else jobs
         
         return cleaned_data
     
@@ -312,11 +301,12 @@ class JobBoardMonitor:
     
     def extract_job_id(self, job_text: str, company: str) -> str:
         """Extract a stable job ID from job text"""
-        # Try to extract job ID from text
+        # Try to extract actual job ID
         job_id_patterns = [
             r'Job ID:\s*(\d+)',
             r'job[_-]?id[:\s]+(\w+)',
             r'#(\d{5,})',
+            r'req[_-]?(\d+)',
             r'ID:\s*(\w+)'
         ]
         
@@ -325,15 +315,13 @@ class JobBoardMonitor:
             if match:
                 return f"{company}_{match.group(1)}"
         
-        # Extract just the job title (first line or up to first delimiter)
+        # Clean and use title as ID
         clean_text = job_text.strip()
-        # Remove dates, locations, and other metadata
         clean_text = re.sub(r'(Today|Yesterday|\d+ days? ago).*', '', clean_text)
-        clean_text = re.sub(r'(Locations?|Posted|Updated).*', '', clean_text)
+        clean_text = re.sub(r'(Posted|Updated|Location).*', '', clean_text)
         clean_text = clean_text.split('•')[0].split('|')[0].split('\n')[0]
-        clean_text = clean_text.strip()[:100]  # First 100 chars of title
+        clean_text = clean_text.strip()[:80]
         
-        # Create hash from cleaned title
         return hashlib.md5(f"{company}_{clean_text}".encode()).hexdigest()
     
     def is_junk_text(self, text: str) -> bool:
@@ -345,31 +333,29 @@ class JobBoardMonitor:
         
         # Comprehensive junk patterns
         junk_patterns = [
-            'cookie', 'consent', 'privacy', 'manage preferences', 'cookie list',
-            'do not sell', 'help center', 'about us', 'newsroom', 'investors',
-            'careers blog', 'start job search', 'deliver', 'uber for business',
-            'uber freight', 'safety', 'sustainability', 'accessibility',
-            'view role', 'read more', 'submit resume', 'connect with',
-            'visit help center', 'google data policy', 'multiple locations',
-            'engineering', 'facebook', 'instagram', 'ai infrastructure',
-            'advertising technology', 'ai research', 'ar/vr', 'artificial intelligence',
-            'data & analytics', 'facebook reality labs', 'generative ai',
-            'infrastructure', 'global', 'meta$', 'uber$', 'careers$',
+            'cookie', 'consent', 'privacy', 'manage preferences',
+            'do not sell', 'help center', 'about us', 'newsroom',
+            'careers blog', 'submit resume', 'view role', 'read more',
             'all departments', 'all locations', 'no positions available',
-            'inside uber', 'view all', 'load more', 'show more'
+            'load more', 'show more', 'view all', 'sign in', 'log in',
+            'create account', 'subscribe', 'follow us', 'contact us'
         ]
         
         for pattern in junk_patterns:
             if pattern in text_lower:
                 return True
         
-        # Check if it's just a single generic word
-        if ' ' not in text and text_lower in ['engineering', 'sales', 'marketing', 'design', 'global', 'meta', 'facebook', 'instagram']:
-            return True
+        # Single word filters
+        if ' ' not in text and len(text) < 20:
+            if text_lower in ['engineering', 'sales', 'marketing', 'design', 
+                             'global', 'meta', 'facebook', 'instagram', 'careers']:
+                return True
         
-        # Check if it lacks job keywords when short
-        if len(text) < 20:
-            job_keywords = ['product', 'program', 'project', 'manager', 'engineer', 'developer', 'analyst', 'designer', 'scientist']
+        # Must contain job-related keywords
+        if len(text) < 30:
+            job_keywords = ['product', 'program', 'project', 'manager', 
+                          'engineer', 'developer', 'analyst', 'designer', 
+                          'scientist', 'director', 'lead', 'senior']
             if not any(kw in text_lower for kw in job_keywords):
                 return True
         
@@ -377,122 +363,176 @@ class JobBoardMonitor:
     
     def is_truly_new_job(self, job_id: str, company: str) -> bool:
         """Check if this job is truly new (not sent before)"""
-        # Check if we've already sent an email about this job
+        # Fixed: Only takes 2 parameters now
         if company in self.sent_jobs and job_id in self.sent_jobs.get(company, []):
             return False
         return True
     
-    def scrape_job_board(self, company: str, config: Dict) -> List[Tuple[str, str]]:
-        """Scrape job board using Playwright with pagination support"""
+    def scrape_greenhouse_api(self, company: str, token: str) -> List[Tuple[str, str]]:
+        """Use Greenhouse API to get jobs"""
         jobs = []
+        try:
+            # Get all departments first
+            dept_url = f'https://boards-api.greenhouse.io/v1/boards/{token}/departments'
+            response = requests.get(dept_url, timeout=10)
+            
+            department_ids = []
+            if response.status_code == 200:
+                departments = response.json().get('departments', [])
+                logger.info(f"Found {len(departments)} departments for {company}")
+                department_ids = [d['id'] for d in departments]
+            
+            # Get jobs from main endpoint
+            jobs_url = f'https://boards-api.greenhouse.io/v1/boards/{token}/jobs'
+            response = requests.get(jobs_url, timeout=10)
+            
+            if response.status_code == 200:
+                job_list = response.json().get('jobs', [])
+                logger.info(f"Found {len(job_list)} total jobs for {company}")
+                
+                for job in job_list:
+                    title = job.get('title', '')
+                    job_id = str(job.get('id', ''))
+                    location = job.get('location', {}).get('name', '')
+                    
+                    # Filter for relevant jobs
+                    if self.is_relevant_job(title, location):
+                        unique_id = f"{company}_api_{job_id}"
+                        jobs.append((unique_id, title))
+                        
+                        # Track new jobs
+                        if company not in self.job_history:
+                            self.job_history[company] = {}
+                        
+                        if unique_id not in self.job_history[company]:
+                            self.job_history[company][unique_id] = {
+                                'title': title,
+                                'first_seen': datetime.now().isoformat()
+                            }
+                            
+                            if self.is_truly_new_job(unique_id, company):
+                                self.new_jobs.append({
+                                    'company': company,
+                                    'job_title': title,
+                                    'location': location,
+                                    'url': f'https://boards.greenhouse.io/{token}',
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
+                                })
+                                logger.info(f"NEW JOB: {company} - {title}")
+            
+            logger.info(f"Total unique jobs found for {company} via API: {len(jobs)}")
+            
+        except Exception as e:
+            logger.error(f"Error with {company} API: {e}")
+            return []
+        
+        return jobs
+    
+    def is_relevant_job(self, title: str, location: str = '') -> bool:
+        """Check if job is relevant based on title and location"""
+        # Check for relevant keywords
+        keywords = ['product', 'program', 'project', 'manager', 'technical', 
+                   'engineering', 'lead', 'director', 'principal']
+        
+        title_lower = title.lower()
+        if not any(kw in title_lower for kw in keywords):
+            return False
+        
+        # Check location if provided
+        if location:
+            us_locations = ['United States', 'USA', 'US', 'New York', 'NY',
+                          'San Francisco', 'SF', 'Remote', 'Seattle', 'Mountain View',
+                          'Austin', 'Boston', 'Chicago', 'Los Angeles']
+            if not any(loc in location for loc in us_locations):
+                return False
+        
+        return True
+    
+    def scrape_job_board(self, company: str, config: Dict) -> List[Tuple[str, str]]:
+        """Enhanced scraping with better error handling and pagination"""
+        jobs = []
+        
+        # Try API first if configured
+        if config.get('method') == 'api' and config.get('api_token'):
+            api_jobs = self.scrape_greenhouse_api(company, config['api_token'])
+            if api_jobs:
+                return api_jobs
+            logger.info(f"API failed for {company}, falling back to web scraping")
+        
         try:
             logger.info(f"Checking {company}...")
             
             with sync_playwright() as p:
-                # Launch browser
                 browser = p.chromium.launch(
                     headless=True,
-                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+                    args=[
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-dev-shm-usage'
+                    ]
                 )
                 
                 context = browser.new_context(
                     viewport={'width': 1920, 'height': 1080},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 )
                 
                 page = context.new_page()
                 
-                # Navigate to the page
+                # Handle Cloudflare if needed
+                if config.get('handle_cloudflare'):
+                    page.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => undefined
+                        });
+                    """)
+                
+                # Navigate to page
                 logger.info(f"Loading {company} careers page...")
-                try:
-                    page.goto(config['url'], wait_until='domcontentloaded', timeout=30000)
-                except:
-                    # Try networkidle if domcontentloaded fails
-                    page.goto(config['url'], wait_until='networkidle', timeout=30000)
+                page.goto(config['url'], wait_until='domcontentloaded', timeout=30000)
                 
-                # Wait for content to load
-                wait_time = config.get('wait_for', 5000)
-                page.wait_for_timeout(wait_time)
+                # Wait for content
+                page.wait_for_timeout(config.get('wait_for', 5000))
                 
-                # Try to handle cookie banners or popups
-                try:
-                    popup_selectors = [
-                        'button:has-text("Accept")',
-                        'button:has-text("OK")',
-                        'button:has-text("Got it")',
-                        'button[aria-label*="close"]',
-                        'button[aria-label*="dismiss"]'
-                    ]
-                    for selector in popup_selectors:
-                        if page.locator(selector).count() > 0:
-                            page.locator(selector).first.click()
-                            page.wait_for_timeout(1000)
-                            break
-                except:
-                    pass
+                # Handle cookies/popups
+                self.handle_popups(page)
                 
-                # Handle pagination - check up to 5 pages or until no more jobs found
+                # Check multiple pages
                 pages_checked = 0
-                max_pages = 5
+                max_pages = 5 if config.get('pagination') else 1
                 
                 while pages_checked < max_pages:
                     pages_checked += 1
                     logger.info(f"Checking page {pages_checked} for {company}")
                     
-                    # Try to click "View More" or "Load More" buttons if configured
+                    # Load more content if needed
                     if config.get('scroll'):
-                        try:
-                            for _ in range(3):  # Try clicking multiple times
-                                load_more_selectors = [
-                                    'button:has-text("View More")',
-                                    'button:has-text("Load More")',
-                                    'button:has-text("Show More")',
-                                    'button:has-text("Load more")',
-                                    'a:has-text("View More")',
-                                    'button[aria-label*="load more"]'
-                                ]
-                                clicked = False
-                                for selector in load_more_selectors:
-                                    if page.locator(selector).count() > 0 and page.locator(selector).first.is_visible():
-                                        page.locator(selector).first.click()
-                                        page.wait_for_timeout(2000)
-                                        clicked = True
-                                        break
-                                if not clicked:
-                                    break
-                        except:
-                            pass
-                        
-                        # Scroll to load more content
-                        for _ in range(3):
-                            page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                            page.wait_for_timeout(1500)
+                        self.handle_infinite_scroll(page)
                     
-                    # Try multiple selectors
-                    selectors = config.get('selectors', [])
-                    page_jobs_found = False
-                    
-                    for selector in selectors:
+                    # Try all selectors
+                    found_elements = False
+                    for selector in config.get('selectors', []):
                         try:
                             elements = page.locator(selector).all()
                             if elements:
                                 logger.info(f"Found {len(elements)} job elements for {company} on page {pages_checked}")
-                                page_jobs_found = True
+                                found_elements = True
                                 
-                                for idx, element in enumerate(elements):
+                                for element in elements:
                                     try:
                                         job_text = element.text_content()
-                                        if job_text and len(job_text) > 5 and not self.is_junk_text(job_text):
+                                        if job_text and not self.is_junk_text(job_text):
                                             job_id = self.extract_job_id(job_text, company)
                                             
-                                            # Check if we've already seen this job
+                                            # Avoid duplicates
                                             if job_id in [j[0] for j in jobs]:
-                                                continue  # Skip duplicate
+                                                continue
                                             
                                             job_title = job_text.strip()[:100]
                                             jobs.append((job_id, job_title))
                                             
-                                            # Check if this is a new job
+                                            # Track job
                                             if company not in self.job_history:
                                                 self.job_history[company] = {}
                                             
@@ -501,57 +541,36 @@ class JobBoardMonitor:
                                                     'title': job_title,
                                                     'first_seen': datetime.now().isoformat()
                                                 }
-                                            
-                                            if self.is_truly_new_job(job_id, company, job_text):
-                                                self.new_jobs.append({
-                                                    'company': company,
-                                                    'job_title': job_title,
-                                                    'url': config['url'],
-                                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
-                                                })
-                                                logger.info(f"NEW JOB: {company} - {job_title}")
+                                                
+                                                if self.is_truly_new_job(job_id, company):
+                                                    self.new_jobs.append({
+                                                        'company': company,
+                                                        'job_title': job_title,
+                                                        'url': config['url'],
+                                                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
+                                                    })
+                                                    logger.info(f"NEW JOB: {company} - {job_title}")
                                     except Exception as e:
-                                        logger.debug(f"Error processing element {idx}: {e}")
+                                        logger.debug(f"Error processing element: {e}")
                                         continue
-                                break  # Exit selector loop if we found elements
+                                break
                         except Exception as e:
                             logger.debug(f"Selector {selector} failed: {e}")
                             continue
                     
-                    # Try to find and click "Next" button for pagination
-                    next_clicked = False
-                    if pages_checked < max_pages:
-                        try:
-                            next_selectors = [
-                                'a:has-text("Next")',
-                                'button:has-text("Next")',
-                                'a[aria-label*="Next"]',
-                                'button[aria-label*="Next"]',
-                                'a:has-text("→")',
-                                'button:has-text("→")',
-                                f'a:has-text("{pages_checked + 1}")',  # Page number
-                                f'button:has-text("{pages_checked + 1}")'
-                            ]
-                            
-                            for selector in next_selectors:
-                                if page.locator(selector).count() > 0 and page.locator(selector).first.is_visible():
-                                    page.locator(selector).first.click()
-                                    page.wait_for_timeout(3000)
-                                    next_clicked = True
-                                    logger.info(f"Navigated to page {pages_checked + 1} for {company}")
-                                    break
-                        except:
-                            pass
-                    
-                    # If no next button clicked and no jobs found on this page, stop pagination
-                    if not next_clicked and not page_jobs_found:
-                        logger.info(f"No more pages to check for {company}")
+                    # Try pagination if configured
+                    if config.get('pagination') and pages_checked < max_pages:
+                        if not self.navigate_next_page(page, pages_checked):
+                            logger.info(f"No more pages for {company}")
+                            break
+                    elif not found_elements:
+                        logger.warning(f"No job elements found for {company} on page {pages_checked}")
                         break
                 
-                if not jobs:
-                    logger.warning(f"No job elements found for {company} after checking {pages_checked} pages")
+                if jobs:
+                    logger.info(f"Total jobs found for {company}: {len(jobs)}")
                 else:
-                    logger.info(f"Total jobs found for {company}: {len(jobs)} across {pages_checked} pages")
+                    logger.warning(f"No jobs found for {company}")
                 
                 browser.close()
                 
@@ -560,134 +579,83 @@ class JobBoardMonitor:
         
         return jobs
     
-    def scrape_greenhouse_api(self, company: str, board_token: str) -> List[Tuple[str, str]]:
-        """Scrape Greenhouse boards using their public API - gets ALL jobs from ALL departments"""
-        jobs = []
+    def handle_popups(self, page):
+        """Handle cookie banners and popups"""
         try:
-            # First get all departments
-            departments_url = f'https://boards-api.greenhouse.io/v1/boards/{board_token}/departments'
-            response = requests.get(departments_url, timeout=10)
+            popup_selectors = [
+                'button:has-text("Accept")',
+                'button:has-text("OK")',
+                'button:has-text("Got it")',
+                'button[aria-label*="close"]',
+                'button[aria-label*="dismiss"]',
+                'button:has-text("Continue")'
+            ]
+            for selector in popup_selectors:
+                if page.locator(selector).count() > 0:
+                    page.locator(selector).first.click()
+                    page.wait_for_timeout(1000)
+                    break
+        except:
+            pass
+    
+    def handle_infinite_scroll(self, page):
+        """Handle infinite scroll and load more buttons"""
+        try:
+            # Try load more buttons first
+            load_selectors = [
+                'button:has-text("View More")',
+                'button:has-text("Load More")',
+                'button:has-text("Show More")',
+                'a:has-text("View More")'
+            ]
             
-            department_ids = []
-            if response.status_code == 200:
-                data = response.json()
-                departments = data.get('departments', [])
-                logger.info(f"Found {len(departments)} departments for {company}")
-                for dept in departments:
-                    department_ids.append(dept.get('id'))
-            
-            # Get jobs from main API
-            api_url = f'https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs'
-            response = requests.get(api_url, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                job_list = data.get('jobs', [])
-                logger.info(f"Found {len(job_list)} total jobs for {company}")
+            for _ in range(3):
+                clicked = False
+                for selector in load_selectors:
+                    if page.locator(selector).count() > 0:
+                        try:
+                            page.locator(selector).first.click()
+                            page.wait_for_timeout(2000)
+                            clicked = True
+                            break
+                        except:
+                            pass
                 
-                for job in job_list:
-                    title = job.get('title', '')
-                    job_id = str(job.get('id', ''))
-                    location = job.get('location', {}).get('name', '')
-                    
-                    # Filter for US/relevant locations and keywords
-                    if any(loc in str(location) for loc in ['United States', 'USA', 'US', 'New York', 'San Francisco', 'Remote', 'Seattle', 'Mountain View']):
-                        if any(keyword in title.lower() for keyword in ['product', 'program', 'project', 'manager', 'technical']):
-                            unique_id = f"{company}_gh_{job_id}"
-                            jobs.append((unique_id, title))
-                            
-                            if company not in self.job_history:
-                                self.job_history[company] = {}
-                            
-                            if unique_id not in self.job_history[company]:
-                                self.job_history[company][unique_id] = {
-                                    'title': title,
-                                    'first_seen': datetime.now().isoformat()
-                                }
-                            
-                            if self.is_truly_new_job(unique_id, company):
-                                self.new_jobs.append({
-                                    'company': company,
-                                    'job_title': title,
-                                    'location': location,
-                                    'url': f'https://boards.greenhouse.io/{board_token}',
-                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
-                                })
-                                logger.info(f"NEW JOB: {company} - {title}")
+                if not clicked:
+                    # Scroll instead
+                    page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                    page.wait_for_timeout(1500)
+        except:
+            pass
+    
+    def navigate_next_page(self, page, current_page: int) -> bool:
+        """Navigate to next page"""
+        try:
+            next_selectors = [
+                f'a:has-text("{current_page + 1}")',
+                f'button:has-text("{current_page + 1}")',
+                'a:has-text("Next")',
+                'button:has-text("Next")',
+                'a[aria-label*="Next"]',
+                'button[aria-label*="Next"]'
+            ]
             
-            # Also check each department specifically
-            for dept_id in department_ids[:10]:  # Check up to 10 departments
-                try:
-                    dept_url = f'https://boards-api.greenhouse.io/v1/boards/{board_token}/departments/{dept_id}/jobs'
-                    response = requests.get(dept_url, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        dept_jobs = data.get('jobs', [])
-                        for job in dept_jobs:
-                            title = job.get('title', '')
-                            job_id = str(job.get('id', ''))
-                            location = job.get('location', {}).get('name', '')
-                            
-                            unique_id = f"{company}_gh_{job_id}"
-                            # Check if we've already seen this job
-                            if unique_id in [j[0] for j in jobs]:
-                                continue
-                            
-                            if any(loc in str(location) for loc in ['United States', 'USA', 'US', 'New York', 'San Francisco', 'Remote', 'Seattle']):
-                                if any(keyword in title.lower() for keyword in ['product', 'program', 'project', 'manager', 'technical']):
-                                    jobs.append((unique_id, title))
-                                    
-                                    if company not in self.job_history:
-                                        self.job_history[company] = {}
-                                    
-                                    if unique_id not in self.job_history[company]:
-                                        self.job_history[company][unique_id] = {
-                                            'title': title,
-                                            'first_seen': datetime.now().isoformat()
-                                        }
-                                    
-                                    if self.is_truly_new_job(unique_id, company):
-                                        self.new_jobs.append({
-                                            'company': company,
-                                            'job_title': title,
-                                            'location': location,
-                                            'url': f'https://boards.greenhouse.io/{board_token}',
-                                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
-                                        })
-                                        logger.info(f"NEW JOB (from dept): {company} - {title}")
-                except:
-                    continue
-            
-            logger.info(f"Total unique jobs found for {company} via API: {len(jobs)}")
-                                
+            for selector in next_selectors:
+                if page.locator(selector).count() > 0:
+                    page.locator(selector).first.click()
+                    page.wait_for_timeout(3000)
+                    logger.info(f"Navigated to page {current_page + 1}")
+                    return True
         except Exception as e:
-            logger.error(f"Error fetching {company} Greenhouse API: {e}")
-            # Fallback to playwright scraping if API fails
-            return []
+            logger.debug(f"Pagination error: {e}")
         
-        return jobs
+        return False
     
     def check_all_boards(self):
         """Check all job boards for new postings"""
-        # Special handling for Greenhouse boards
-        greenhouse_boards = {
-            'Anthropic': 'anthropic',
-            'Intrinsic': 'intrinsic',
-            'Netflix': 'netflix',
-            'SpaceX': 'spacex',
-            'OpenAI': 'openai'
-        }
-        
         for company, config in self.job_boards.items():
             try:
-                # Try Greenhouse API first for supported companies
-                if company in greenhouse_boards:
-                    jobs = self.scrape_greenhouse_api(company, greenhouse_boards[company])
-                    if not jobs:
-                        # Fallback to playwright if API fails
-                        jobs = self.scrape_job_board(company, config)
-                else:
-                    jobs = self.scrape_job_board(company, config)
+                jobs = self.scrape_job_board(company, config)
                 
                 # Update sent jobs tracking
                 if company not in self.sent_jobs:
@@ -697,7 +665,7 @@ class JobBoardMonitor:
                     if job_id not in self.sent_jobs[company]:
                         self.sent_jobs[company].append(job_id)
                 
-                # Keep only recent sent jobs (last 200)
+                # Keep only recent sent jobs
                 self.sent_jobs[company] = self.sent_jobs[company][-200:]
                 
                 # Rate limiting
@@ -747,13 +715,13 @@ class JobBoardMonitor:
             logger.error(f"Error saving history: {e}")
     
     def send_email_notification(self):
-        """Send email notification for truly new jobs only - NEVER existing jobs"""
+        """Send email notification for truly new jobs only"""
         if not self.new_jobs:
-            logger.info("No new jobs found")
+            logger.info("No new jobs found in this run")
             return
         
         try:
-            # Remove duplicates - only truly NEW jobs posted since last check
+            # Remove duplicates
             seen = set()
             unique_jobs = []
             for job in self.new_jobs:
@@ -794,10 +762,10 @@ class JobBoardMonitor:
             <body>
                 <h2>🚀 New Job Postings Alert</h2>
                 <div class="summary">
-                    <strong>Total NEW job postings: {len(unique_jobs)}</strong><br>
+                    <strong>Total new jobs: {len(unique_jobs)}</strong><br>
                     Check time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
                     <span class="new-badge">NEW</span> = Job posting created since last check<br>
-                    <em>Note: Only showing jobs that were JUST posted, not existing jobs</em>
+                    <em>Note: Only showing jobs that were JUST posted</em>
                 </div>
             """
             
@@ -808,7 +776,7 @@ class JobBoardMonitor:
                     jobs_by_company[job['company']] = []
                 jobs_by_company[job['company']].append(job)
             
-            # Show ALL 18 companies, even those with no new jobs
+            # Show ALL companies
             all_companies = sorted(self.job_boards.keys())
             
             for company in all_companies:
@@ -816,43 +784,35 @@ class JobBoardMonitor:
                 company_url = self.job_boards[company]['url']
                 
                 if jobs:
-                    # Company has new jobs
                     html_body += f"""
                     <div class="job">
-                        <div class="company">🏢 {company} ({len(jobs)} NEW postings)</div>
+                        <div class="company">🏢 {company} ({len(jobs)} NEW positions)</div>
                     """
-                    for job in jobs[:10]:  # Show max 10 jobs per company
+                    # Show ALL jobs, not limited
+                    for job in jobs:
                         location = job.get('location', '')
                         location_text = f" - {location}" if location else ""
                         html_body += f"""
                         <div class="job-title">• {job['job_title']}{location_text} <span class="new-badge">NEW</span></div>
                         """
-                    if len(jobs) > 10:
-                        html_body += f"""
-                        <div class="job-title">... and {len(jobs) - 10} more new positions</div>
-                        """
                 else:
-                    # Company has no new jobs
                     html_body += f"""
                     <div class="job">
                         <div class="company">🏢 {company}</div>
                         <div class="no-jobs">No new job postings since last check</div>
                     """
                 
-                # Always include link to job board
                 html_body += f"""
-                    <div style="margin-top: 10px;"><a href="{company_url}">View {company} Job Board →</a></div>
+                    <div style="margin-top: 10px;"><a href="{company_url}">View All {company} Jobs →</a></div>
                 </div>
                 """
             
             html_body += """
                 <hr>
                 <p style="color: #7f8c8d; font-size: 12px;">
-                    <strong>Important:</strong> This notification ONLY includes brand new job postings that were created since the last check.<br>
-                    Existing jobs on the boards are NOT shown, even if they were posted recently.<br>
-                    Checking frequency: Every hour<br>
-                    Companies monitored: 18<br>
-                    <strong>Tip:</strong> Be among the first to apply to these brand new postings!
+                    Automated Job Board Monitor<br>
+                    Checking: Every hour | Companies: 18<br>
+                    Apply within 24 hours for best results!
                 </p>
             </body>
             </html>
@@ -861,14 +821,14 @@ class JobBoardMonitor:
             part = MIMEText(html_body, 'html')
             msg.attach(part)
             
-            # Send email via Gmail
+            # Send email
             logger.info("Connecting to Gmail SMTP server...")
             with smtplib.SMTP('smtp.gmail.com', 587) as server:
                 server.starttls()
                 server.login(self.gmail_user, self.gmail_password)
                 server.send_message(msg)
             
-            logger.info(f"✅ Email sent successfully with {len(unique_jobs)} NEW jobs!")
+            logger.info(f"✅ Email sent successfully with {len(unique_jobs)} new jobs!")
             
         except Exception as e:
             logger.error(f"❌ Error sending email: {e}")
