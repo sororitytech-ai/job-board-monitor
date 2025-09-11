@@ -502,7 +502,7 @@ class JobBoardMonitor:
                                                     'first_seen': datetime.now().isoformat()
                                                 }
                                             
-                                            if self.is_truly_new_job(job_id, company):
+                                            if self.is_truly_new_job(job_id, company, job_text):
                                                 self.new_jobs.append({
                                                     'company': company,
                                                     'job_title': job_title,
