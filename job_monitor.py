@@ -5,15 +5,17 @@ import hashlib
 import smtplib
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# Configure logging
+# ==============================
+# Logging
+# ==============================
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
@@ -25,267 +27,191 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==============================
+# Helpers
+# ==============================
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def parse_dt_safe(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        # handle common formats incl. ...Z
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+def hours_ago(dt: datetime) -> float:
+    return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 3600.0
+
+def stable_hash(*parts: str) -> str:
+    joined = '||'.join(p.strip() for p in parts if p)
+    return hashlib.sha256(joined.encode('utf-8')).hexdigest()[:24]
+
+def normalize_space(s: str) -> str:
+    return re.sub(r'\s+', ' ', s or '').strip()
+
+# ==============================
+# Core class
+# ==============================
 class JobBoardMonitor:
+    NEW_WINDOW_HOURS = 48  # include only postings within last 24–48h; we use 48h to be safe
+
     def __init__(self):
         self.gmail_user = os.environ.get('GMAIL_USER')
         self.gmail_password = os.environ.get('GMAIL_PASSWORD')
         self.gist_token = os.environ.get('GIST_TOKEN')
-        self.job_history = self.load_job_history()
-        self.sent_jobs = self.load_sent_jobs()
-        self.new_jobs = []
-        
-        # Updated configurations with better selectors and API endpoints
+        self.job_history: Dict[str, Dict[str, dict]] = self.load_gist_file('job_history.json') or {}
+        self.sent_jobs: Dict[str, List[str]] = self.load_gist_file('sent_jobs.json') or {}
+        self.found_jobs: Dict[str, Dict[str, dict]] = {}  # per-run catalog of *all* jobs discovered
+        self.candidate_new_jobs: List[dict] = []          # after filtering + age-window
+
+        # Company configurations
         self.job_boards = {
             'Google': {
                 'url': 'https://www.google.com/about/careers/applications/jobs/results/?location=United%20States&sort_by=date&q=product%2C%20program%2C%20project',
                 'method': 'playwright',
-                'selectors': [
-                    'li.gc-card',
-                    'div.gc-card__container',
-                    'a.gc-card__title-link'
-                ],
-                'wait_for': 7000,
+                'selectors': ['a.gc-card__title-link', 'li.gc-card a[href*="/jobs/results"]'],
+                'wait_for': 8000,
                 'scroll': True,
                 'pagination': True
             },
             'Intrinsic': {
                 'url': 'https://boards.greenhouse.io/intrinsic',
-                'method': 'api',
-                'api_token': 'intrinsic',
-                'fallback_selectors': ['div.opening a']
+                'method': 'greenhouse_api',
+                'board_token': 'intrinsic'
             },
             'Waymo': {
                 'url': 'https://careers.withwaymo.com/jobs/search?page=1&query=project%2C+program%2C+product',
                 'method': 'playwright',
-                'selectors': [
-                    'a[data-testid="job-title"]',
-                    'h3[data-testid="job-title"]',
-                    'div.job-card h3'
-                ],
+                'selectors': ['a[data-testid="job-title"]'],
                 'wait_for': 6000,
                 'pagination': True
             },
             'Wing': {
                 'url': 'https://wing.com/careers',
                 'method': 'playwright',
-                'selectors': [
-                    'div.careers-section a[href*="/careers/"]',
-                    'div.job-card',
-                    'h3.job-title'
-                ],
+                'selectors': ['a[href*="/careers/"] h3', 'a[href*="/careers/roles/"]'],
                 'wait_for': 6000,
                 'scroll': True
             },
             'X Moonshot': {
                 'url': 'https://x.company/careers/',
                 'method': 'playwright',
-                'selectors': [
-                    'a.job-listing-link',
-                    'div.job-listing h3',
-                    'article.job-card h3'
-                ],
+                'selectors': ['a[href*="/careers/"] h3', 'article a[href*="jobs"]'],
                 'wait_for': 6000,
                 'scroll': True
             },
             'Apple': {
                 'url': 'https://jobs.apple.com/en-us/search?sort=newest&key=Product%25252C%252520Program%25252C%252520Project&location=united-states-USA',
                 'method': 'playwright',
-                'selectors': [
-                    'td.table-col-1 a',
-                    'span[id*="job-title"]',
-                    'a[id*="job-link"]'
-                ],
-                'wait_for': 7000,
+                'selectors': ['a[id*="job-link"]', 'td.table-col-1 a[id]'],
+                'wait_for': 8000,
                 'scroll': True,
                 'pagination': True
             },
             'NVIDIA': {
                 'url': 'https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite?q=product,%20program,%20project',
                 'method': 'playwright',
-                'selectors': [
-                    'a[data-automation-id="jobTitle"]',
-                    'h3[data-automation-id="jobTitle"]'
-                ],
+                'selectors': ['a[data-automation-id="jobTitle"]'],
                 'wait_for': 8000,
                 'pagination': True
             },
             'Netflix': {
-                'url': 'https://jobs.netflix.com/',
-                'method': 'api',
-                'api_token': 'netflix',
-                'fallback_url': 'https://explore.jobs.netflix.net/careers?pid=790301701184&domain=netflix.com&sort_by=new'
+                'url': 'https://explore.jobs.netflix.net/careers?domain=netflix.com&sort_by=new',
+                'method': 'greenhouse_api_like',
+                'note': 'Netflix Explore (GH-like JSON behind site). Fallback: treat as scraped links.'
             },
             'Anthropic': {
                 'url': 'https://boards.greenhouse.io/anthropic',
-                'method': 'api',
-                'api_token': 'anthropic',
-                'fallback_selectors': ['div.opening a']
+                'method': 'greenhouse_api',
+                'board_token': 'anthropic'
             },
             'Tesla': {
                 'url': 'https://www.tesla.com/careers/search/?region=5&site=US&type=1',
                 'method': 'playwright',
-                'selectors': [
-                    'tr.tds-table-row td:first-child a',
-                    'tbody tr td a[href*="/careers/"]'
-                ],
-                'wait_for': 8000,
+                'selectors': ['tbody tr td:first-child a[href*="/careers/"]'],
+                'wait_for': 10000,
                 'scroll': True,
                 'handle_cloudflare': True
             },
             'Amazon': {
                 'url': 'https://www.amazon.jobs/en/search?offset=0&result_limit=10&sort=recent&job_type%5B%5D=Full-Time&country%5B%5D=USA&state%5B%5D=New%20York&state%5B%5D=New%20Jersey',
                 'method': 'playwright',
-                'selectors': [
-                    'h3.job-title a',
-                    'div.job h3.job-title'
-                ],
-                'wait_for': 5000,
+                'selectors': ['h3.job-title a'],
+                'wait_for': 6000,
                 'pagination': True
             },
             'Meta': {
                 'url': 'https://www.metacareers.com/jobs',
                 'method': 'playwright',
-                'selectors': [
-                    'a[href*="/v2/jobs/"] div',
-                    'div[role="heading"]',
-                    'div._8sef a'
-                ],
-                'wait_for': 7000,
+                'selectors': ['a[href*="/v2/jobs/"]'],
+                'wait_for': 8000,
                 'scroll': True,
                 'pagination': True
             },
             'SpaceX': {
-                'url': 'https://www.spacex.com/careers/list',
-                'method': 'api',
-                'api_token': 'spacex',
-                'fallback_url': 'https://www.spacex.com/careers/jobs/'
+                'url': 'https://www.spacex.com/careers/jobs/',
+                'method': 'greenhouse_api',
+                'board_token': 'spacex'
             },
             'Stripe': {
                 'url': 'https://stripe.com/jobs/search?office_locations=North+America--New+York',
                 'method': 'playwright',
-                'selectors': [
-                    'a.JobsListings__link span',
-                    'h3.JobsListings__title'
-                ],
-                'wait_for': 5000
+                'selectors': ['a.JobsListings__link'],
+                'wait_for': 6000
             },
             'Uber': {
                 'url': 'https://www.uber.com/us/en/careers/list/?location=USA-New%20York-New%20York&location=USA-New%20York-Bronx',
                 'method': 'playwright',
-                'selectors': [
-                    'a[href*="/careers/list/"] h3',
-                    'h3[data-baseweb]'
-                ],
-                'wait_for': 7000,
+                'selectors': ['a[href*="/careers/"] h3'],
+                'wait_for': 8000,
                 'scroll': True,
                 'pagination': True
             },
             'Two Sigma': {
                 'url': 'https://careers.twosigma.com/careers/OpenRoles',
                 'method': 'playwright',
-                'selectors': [
-                    'span.job-title',
-                    'a[href*="JobDetail"] span'
-                ],
+                'selectors': ['a[href*="JobDetail"] span', 'span.job-title'],
                 'wait_for': 6000,
                 'scroll': True
             },
             'Microsoft': {
                 'url': 'https://jobs.careers.microsoft.com/global/en/search?q=%22product%22%20OR%20%22project%22%20OR%20%22program%22&lc=United%20States&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Recent',
                 'method': 'playwright',
-                'selectors': [
-                    'h2[data-automation-id="jobTitle"]',
-                    'span[data-automation-id="jobTitle"]'
-                ],
+                'selectors': ['h2[data-automation-id="jobTitle"]', 'span[data-automation-id="jobTitle"]'],
                 'wait_for': 6000,
                 'pagination': True
             },
             'OpenAI': {
                 'url': 'https://openai.com/careers/search/',
-                'method': 'api',
-                'api_token': 'openai',
-                'fallback_selectors': ['a[href*="/careers/"] h3']
+                'method': 'greenhouse_api',
+                'board_token': 'openai'
             }
         }
-    
-    def load_job_history(self) -> Dict:
-        """Load job history from GitHub Gist"""
+
+    # ------------------------------
+    # Gist I/O
+    # ------------------------------
+    def _auth_headers(self):
+        return {'Authorization': f'token {self.gist_token}'} if self.gist_token else {}
+
+    def ensure_gist_exists(self) -> Optional[str]:
+        if not self.gist_token:
+            logger.warning("No GIST_TOKEN set — using ephemeral in-memory storage.")
+            return None
         try:
-            if not self.gist_token:
-                logger.warning("No GIST_TOKEN found, using local storage")
-                return {}
-                
-            headers = {'Authorization': f'token {self.gist_token}'}
-            response = requests.get('https://api.github.com/gists', headers=headers)
-            
-            if response.status_code == 200:
-                gists = response.json()
-                for gist in gists:
-                    if 'job_history.json' in gist.get('files', {}):
-                        file_url = gist['files']['job_history.json']['raw_url']
-                        history_response = requests.get(file_url)
-                        data = history_response.json()
-                        return self.clean_old_jobs(data)
-            
-            return self.create_history_gist()
-        except Exception as e:
-            logger.error(f"Error loading job history: {e}")
-            return {}
-    
-    def load_sent_jobs(self) -> Dict:
-        """Load history of jobs we've already sent emails about"""
-        try:
-            if not self.gist_token:
-                return {}
-                
-            headers = {'Authorization': f'token {self.gist_token}'}
-            response = requests.get('https://api.github.com/gists', headers=headers)
-            
-            if response.status_code == 200:
-                gists = response.json()
-                for gist in gists:
-                    if 'sent_jobs.json' in gist.get('files', {}):
-                        file_url = gist['files']['sent_jobs.json']['raw_url']
-                        history_response = requests.get(file_url)
-                        return history_response.json()
-            return {}
-        except Exception as e:
-            logger.error(f"Error loading sent jobs: {e}")
-            return {}
-    
-    def clean_old_jobs(self, job_data: Dict) -> Dict:
-        """Remove jobs older than 7 days"""
-        week_ago = datetime.now() - timedelta(days=7)
-        cleaned_data = {}
-        
-        for company, jobs in job_data.items():
-            if isinstance(jobs, dict):
-                cleaned_jobs = {}
-                for job_id, job_info in jobs.items():
-                    if 'first_seen' in job_info:
-                        try:
-                            first_seen = datetime.fromisoformat(job_info['first_seen'])
-                            if first_seen > week_ago:
-                                cleaned_jobs[job_id] = job_info
-                        except:
-                            cleaned_jobs[job_id] = job_info
-                    else:
-                        cleaned_jobs[job_id] = job_info
-                cleaned_data[company] = cleaned_jobs
-            else:
-                # Legacy format
-                cleaned_data[company] = jobs[-100:] if isinstance(jobs, list) else jobs
-        
-        return cleaned_data
-    
-    def create_history_gist(self) -> Dict:
-        """Create new GitHub Gist for job history"""
-        try:
-            if not self.gist_token:
-                return {}
-                
-            headers = {'Authorization': f'token {self.gist_token}'}
-            data = {
+            r = requests.get('https://api.github.com/gists', headers=self._auth_headers(), timeout=20)
+            if r.status_code == 200:
+                for g in r.json():
+                    files = g.get('files', {}) or {}
+                    if 'job_history.json' in files and 'sent_jobs.json' in files:
+                        return g['id']
+            # Create
+            payload = {
                 'description': 'Job Board Monitor History',
                 'public': False,
                 'files': {
@@ -293,570 +219,455 @@ class JobBoardMonitor:
                     'sent_jobs.json': {'content': json.dumps({})}
                 }
             }
-            requests.post('https://api.github.com/gists', headers=headers, json=data)
-            return {}
+            cr = requests.post('https://api.github.com/gists', headers=self._auth_headers(), json=payload, timeout=20)
+            if cr.status_code in (200, 201):
+                return cr.json()['id']
         except Exception as e:
-            logger.error(f"Error creating history gist: {e}")
-            return {}
-    
-    def extract_job_id(self, job_text: str, company: str) -> str:
-        """Extract a stable job ID from job text"""
-        # Try to extract actual job ID
-        job_id_patterns = [
-            r'Job ID:\s*(\d+)',
-            r'job[_-]?id[:\s]+(\w+)',
-            r'#(\d{5,})',
-            r'req[_-]?(\d+)',
-            r'ID:\s*(\w+)'
-        ]
-        
-        for pattern in job_id_patterns:
-            match = re.search(pattern, job_text, re.IGNORECASE)
-            if match:
-                return f"{company}_{match.group(1)}"
-        
-        # Clean and use title as ID
-        clean_text = job_text.strip()
-        clean_text = re.sub(r'(Today|Yesterday|\d+ days? ago).*', '', clean_text)
-        clean_text = re.sub(r'(Posted|Updated|Location).*', '', clean_text)
-        clean_text = clean_text.split('•')[0].split('|')[0].split('\n')[0]
-        clean_text = clean_text.strip()[:80]
-        
-        return hashlib.md5(f"{company}_{clean_text}".encode()).hexdigest()
-    
+            logger.error(f'ensure_gist_exists error: {e}')
+        return None
+
+    def load_gist_file(self, filename: str):
+        if not self.gist_token:
+            return None
+        try:
+            r = requests.get('https://api.github.com/gists', headers=self._auth_headers(), timeout=20)
+            if r.status_code == 200:
+                for g in r.json():
+                    files = g.get('files', {}) or {}
+                    if filename in files:
+                        raw = files[filename].get('raw_url')
+                        if raw:
+                            fr = requests.get(raw, timeout=20)
+                            if fr.status_code == 200:
+                                try:
+                                    return json.loads(fr.text or '{}')
+                                except Exception:
+                                    return {}
+        except Exception as e:
+            logger.error(f'load_gist_file({filename}) error: {e}')
+        return None
+
+    def save_gist_files(self):
+        gist_id = self.ensure_gist_exists()
+        if not gist_id or not self.gist_token:
+            logger.warning("Skipping Gist save (no token or gist).")
+            return
+        try:
+            payload = {
+                'files': {
+                    'job_history.json': {'content': json.dumps(self.job_history, indent=2)},
+                    'sent_jobs.json': {'content': json.dumps(self.sent_jobs, indent=2)},
+                }
+            }
+            pr = requests.patch(f'https://api.github.com/gists/{gist_id}', headers=self._auth_headers(), json=payload, timeout=20)
+            if pr.status_code not in (200, 201):
+                logger.error(f'Gist save failed {pr.status_code}: {pr.text[:200]}')
+        except Exception as e:
+            logger.error(f'save_gist_files error: {e}')
+
+    # ------------------------------
+    # Junk filtering
+    # ------------------------------
     def is_junk_text(self, text: str) -> bool:
-        """Check if text is junk/navigation element"""
-        if not text or len(text) < 5:
+        if not text or len(text.strip()) < 2:
             return True
-        
-        text_lower = text.lower().strip()
-        
-        # Comprehensive junk patterns
-        junk_patterns = [
-            'cookie', 'consent', 'privacy', 'manage preferences',
-            'do not sell', 'help center', 'about us', 'newsroom',
-            'careers blog', 'submit resume', 'view role', 'read more',
-            'all departments', 'all locations', 'no positions available',
-            'load more', 'show more', 'view all', 'sign in', 'log in',
-            'create account', 'subscribe', 'follow us', 'contact us'
+        t = normalize_space(text).lower()
+
+        junk_substrings = [
+            'cookie', 'consent', 'privacy', 'manage preferences', 'do not sell',
+            'help center', 'about us', 'newsroom', 'careers blog', 'submit resume',
+            'view role', 'read more', 'all departments', 'all locations',
+            'no positions available', 'load more', 'show more', 'view all',
+            'sign in', 'log in', 'create account', 'subscribe', 'follow us',
+            'contact us', 'search results', 'filters', 'apply filters'
         ]
-        
-        for pattern in junk_patterns:
-            if pattern in text_lower:
-                return True
-        
-        # Single word filters
-        if ' ' not in text and len(text) < 20:
-            if text_lower in ['engineering', 'sales', 'marketing', 'design', 
-                             'global', 'meta', 'facebook', 'instagram', 'careers']:
-                return True
-        
-        # Must contain job-related keywords
-        if len(text) < 30:
-            job_keywords = ['product', 'program', 'project', 'manager', 
-                          'engineer', 'developer', 'analyst', 'designer', 
-                          'scientist', 'director', 'lead', 'senior']
-            if not any(kw in text_lower for kw in job_keywords):
-                return True
-        
+        if any(s in t for s in junk_substrings):
+            return True
+
+        single_word_buckets = {'engineering','sales','marketing','design','global','meta','facebook','instagram','careers','jobs'}
+        if ' ' not in t and t in single_word_buckets:
+            return True
+
+        # Must include at least one job-ish keyword
+        jobish = ['product','program','project','manager','engineer','developer','analyst',
+                  'designer','scientist','director','lead','senior','technical','pm']
+        if not any(k in t for k in jobish):
+            return True
+
         return False
-    
-    def is_truly_new_job(self, job_id: str, company: str) -> bool:
-        """Check if this job is truly new (not sent before)"""
-        # Fixed: Only takes 2 parameters now
-        if company in self.sent_jobs and job_id in self.sent_jobs.get(company, []):
-            return False
-        return True
-    
-    def scrape_greenhouse_api(self, company: str, token: str) -> List[Tuple[str, str]]:
-        """Use Greenhouse API to get jobs"""
-        jobs = []
-        try:
-            # Get all departments first
-            dept_url = f'https://boards-api.greenhouse.io/v1/boards/{token}/departments'
-            response = requests.get(dept_url, timeout=10)
-            
-            department_ids = []
-            if response.status_code == 200:
-                departments = response.json().get('departments', [])
-                logger.info(f"Found {len(departments)} departments for {company}")
-                department_ids = [d['id'] for d in departments]
-            
-            # Get jobs from main endpoint
-            jobs_url = f'https://boards-api.greenhouse.io/v1/boards/{token}/jobs'
-            response = requests.get(jobs_url, timeout=10)
-            
-            if response.status_code == 200:
-                job_list = response.json().get('jobs', [])
-                logger.info(f"Found {len(job_list)} total jobs for {company}")
-                
-                for job in job_list:
-                    title = job.get('title', '')
-                    job_id = str(job.get('id', ''))
-                    location = job.get('location', {}).get('name', '')
-                    
-                    # Filter for relevant jobs
-                    if self.is_relevant_job(title, location):
-                        unique_id = f"{company}_api_{job_id}"
-                        jobs.append((unique_id, title))
-                        
-                        # Track new jobs
-                        if company not in self.job_history:
-                            self.job_history[company] = {}
-                        
-                        if unique_id not in self.job_history[company]:
-                            self.job_history[company][unique_id] = {
-                                'title': title,
-                                'first_seen': datetime.now().isoformat()
-                            }
-                            
-                            if self.is_truly_new_job(unique_id, company):
-                                self.new_jobs.append({
-                                    'company': company,
-                                    'job_title': title,
-                                    'location': location,
-                                    'url': f'https://boards.greenhouse.io/{token}',
-                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
-                                })
-                                logger.info(f"NEW JOB: {company} - {title}")
-            
-            logger.info(f"Total unique jobs found for {company} via API: {len(jobs)}")
-            
-        except Exception as e:
-            logger.error(f"Error with {company} API: {e}")
-            return []
-        
-        return jobs
-    
+
+    # ------------------------------
+    # Relevance
+    # ------------------------------
     def is_relevant_job(self, title: str, location: str = '') -> bool:
-        """Check if job is relevant based on title and location"""
-        # Check for relevant keywords
-        keywords = ['product', 'program', 'project', 'manager', 'technical', 
-                   'engineering', 'lead', 'director', 'principal']
-        
-        title_lower = title.lower()
-        if not any(kw in title_lower for kw in keywords):
+        title_l = (title or '').lower()
+        if not any(k in title_l for k in ['product','program','project']):
             return False
-        
-        # Check location if provided
         if location:
-            us_locations = ['United States', 'USA', 'US', 'New York', 'NY',
-                          'San Francisco', 'SF', 'Remote', 'Seattle', 'Mountain View',
-                          'Austin', 'Boston', 'Chicago', 'Los Angeles']
-            if not any(loc in location for loc in us_locations):
+            us_locs = ['united states','usa','us','new york','ny','remote','seattle','mountain view',
+                       'austin','boston','chicago','los angeles','sf','san francisco']
+            if not any(loc in location.lower() for loc in us_locs):
                 return False
-        
         return True
-    
-    def scrape_job_board(self, company: str, config: Dict) -> List[Tuple[str, str]]:
-        """Enhanced scraping with better error handling and pagination"""
-        jobs = []
-        
-        # Try API first if configured
-        if config.get('method') == 'api' and config.get('api_token'):
-            api_jobs = self.scrape_greenhouse_api(company, config['api_token'])
-            if api_jobs:
-                return api_jobs
-            logger.info(f"API failed for {company}, falling back to web scraping")
-        
+
+    # ------------------------------
+    # Job key & storage
+    # ------------------------------
+    def make_job_key(self, company: str, title: str, href: Optional[str], external_id: Optional[str]) -> str:
+        # Prefer external_id, then URL, then title
+        if external_id:
+            return f'{company}:{external_id}'
+        if href:
+            return f'{company}:{stable_hash(href)}'
+        return f'{company}:{stable_hash(title)}'
+
+    def record_discovery(self, company: str, key: str, title: str, url: str, posted_at: Optional[datetime], location: Optional[str] = None):
+        """Update run catalog + persistent job_history first_seen"""
+        if company not in self.found_jobs:
+            self.found_jobs[company] = {}
+        self.found_jobs[company][key] = {
+            'title': title, 'url': url, 'posted_at': posted_at.isoformat() if posted_at else None,
+            'discovered_at': now_utc_iso(), 'location': location or ''
+        }
+
+        if company not in self.job_history:
+            self.job_history[company] = {}
+        if key not in self.job_history[company]:
+            self.job_history[company][key] = {
+                'title': title, 'first_seen': now_utc_iso(), 'url': url,
+                'posted_at': posted_at.isoformat() if posted_at else None, 'location': location or ''
+            }
+
+    # ------------------------------
+    # API scrapers
+    # ------------------------------
+    def scrape_greenhouse_api(self, company: str, board_token: str):
         try:
-            logger.info(f"Checking {company}...")
-            
+            jobs_url = f'https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs'
+            r = requests.get(jobs_url, timeout=20)
+            if r.status_code != 200:
+                logger.warning(f'{company} GH API {r.status_code}')
+                return
+
+            for j in r.json().get('jobs', []):
+                title = j.get('title', '').strip()
+                location = (j.get('location', {}) or {}).get('name', '')
+                if not self.is_relevant_job(title, location):
+                    continue
+                absolute_url = j.get('absolute_url') or f'https://boards.greenhouse.io/{board_token}'
+                external_id = str(j.get('id')) if j.get('id') is not None else None
+                posted_at = parse_dt_safe(j.get('updated_at') or j.get('created_at'))
+
+                key = self.make_job_key(company, title, absolute_url, external_id)
+                self.record_discovery(company, key, title, absolute_url, posted_at, location)
+        except Exception as e:
+            logger.error(f'{company} GH API error: {e}')
+
+    # ------------------------------
+    # Playwright scraper
+    # ------------------------------
+    def scrape_playwright(self, company: str, config: Dict):
+        try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(
                     headless=True,
-                    args=[
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-blink-features=AutomationControlled',
-                        '--disable-dev-shm-usage'
-                    ]
+                    args=['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-blink-features=AutomationControlled']
                 )
-                
                 context = browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
+                    viewport={'width': 1280, 'height': 900},
                     user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 )
-                
-                page = context.new_page()
-                
-                # Handle Cloudflare if needed
                 if config.get('handle_cloudflare'):
-                    page.add_init_script("""
-                        Object.defineProperty(navigator, 'webdriver', {
-                            get: () => undefined
-                        });
-                    """)
-                
-                # Navigate to page
-                logger.info(f"Loading {company} careers page...")
+                    context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+                page = context.new_page()
                 page.goto(config['url'], wait_until='domcontentloaded', timeout=30000)
-                
-                # Wait for content
-                page.wait_for_timeout(config.get('wait_for', 5000))
-                
-                # Handle cookies/popups
-                self.handle_popups(page)
-                
-                # Check multiple pages
+                page.wait_for_timeout(config.get('wait_for', 6000))
+
+                # try dismissing popups
+                self.dismiss_popups(page)
+
                 pages_checked = 0
                 max_pages = 5 if config.get('pagination') else 1
-                
                 while pages_checked < max_pages:
                     pages_checked += 1
-                    logger.info(f"Checking page {pages_checked} for {company}")
-                    
-                    # Load more content if needed
+
                     if config.get('scroll'):
-                        self.handle_infinite_scroll(page)
-                    
-                    # Try all selectors
-                    found_elements = False
-                    for selector in config.get('selectors', []):
+                        self.infinite_scroll(page)
+
+                    found = False
+                    for sel in config.get('selectors', []):
                         try:
-                            elements = page.locator(selector).all()
-                            if elements:
-                                logger.info(f"Found {len(elements)} job elements for {company} on page {pages_checked}")
-                                found_elements = True
-                                
-                                for element in elements:
-                                    try:
-                                        job_text = element.text_content()
-                                        if job_text and not self.is_junk_text(job_text):
-                                            job_id = self.extract_job_id(job_text, company)
-                                            
-                                            # Avoid duplicates
-                                            if job_id in [j[0] for j in jobs]:
-                                                continue
-                                            
-                                            job_title = job_text.strip()[:100]
-                                            jobs.append((job_id, job_title))
-                                            
-                                            # Track job
-                                            if company not in self.job_history:
-                                                self.job_history[company] = {}
-                                            
-                                            if job_id not in self.job_history[company]:
-                                                self.job_history[company][job_id] = {
-                                                    'title': job_title,
-                                                    'first_seen': datetime.now().isoformat()
-                                                }
-                                                
-                                                if self.is_truly_new_job(job_id, company):
-                                                    self.new_jobs.append({
-                                                        'company': company,
-                                                        'job_title': job_title,
-                                                        'url': config['url'],
-                                                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
-                                                    })
-                                                    logger.info(f"NEW JOB: {company} - {job_title}")
-                                    except Exception as e:
-                                        logger.debug(f"Error processing element: {e}")
-                                        continue
-                                break
-                        except Exception as e:
-                            logger.debug(f"Selector {selector} failed: {e}")
+                            els = page.locator(sel).all()
+                        except Exception:
+                            els = []
+                        if not els:
                             continue
-                    
-                    # Try pagination if configured
-                    if config.get('pagination') and pages_checked < max_pages:
-                        if not self.navigate_next_page(page, pages_checked):
-                            logger.info(f"No more pages for {company}")
-                            break
-                    elif not found_elements:
-                        logger.warning(f"No job elements found for {company} on page {pages_checked}")
+                        found = True
+                        for el in els:
+                            raw_text = normalize_space(el.text_content() or '')
+                            href = None
+                            try:
+                                href = el.get_attribute('href')
+                                if (not href) and el.locator('xpath=ancestor-or-self::a[1]').count() > 0:
+                                    href = el.locator('xpath=ancestor-or-self::a[1]').first.get_attribute('href')
+                            except Exception:
+                                pass
+
+                            if self.is_junk_text(raw_text):
+                                continue
+
+                            title = raw_text[:160]
+                            url = href if href and href.startswith('http') else config['url']
+                            key = self.make_job_key(company, title, url, None)
+                            # No reliable 'posted_at' from scraped UIs -> defer to first_seen
+                            self.record_discovery(company, key, title, url, posted_at=None)
+
+                        break  # stop after first selector that yielded results
+
+                    if not found:
                         break
-                
-                if jobs:
-                    logger.info(f"Total jobs found for {company}: {len(jobs)}")
-                else:
-                    logger.warning(f"No jobs found for {company}")
-                
+
+                    if config.get('pagination') and not self.next_page(page, pages_checked):
+                        break
+
                 browser.close()
-                
         except Exception as e:
-            logger.error(f"Error scraping {company}: {e}")
-        
-        return jobs
-    
-    def handle_popups(self, page):
-        """Handle cookie banners and popups"""
+            logger.error(f'{company} Playwright error: {e}')
+
+    def dismiss_popups(self, page):
+        sels = [
+            'button:has-text("Accept")','button:has-text("OK")','button:has-text("Got it")',
+            'button[aria-label*="close"]','button[aria-label*="dismiss"]','button:has-text("Continue")',
+            'button:has-text("Agree")','button:has-text("Allow all")'
+        ]
+        for s in sels:
+            try:
+                if page.locator(s).count() > 0:
+                    page.locator(s).first.click()
+                    page.wait_for_timeout(800)
+            except Exception:
+                pass
+
+    def infinite_scroll(self, page):
         try:
-            popup_selectors = [
-                'button:has-text("Accept")',
-                'button:has-text("OK")',
-                'button:has-text("Got it")',
-                'button[aria-label*="close"]',
-                'button[aria-label*="dismiss"]',
-                'button:has-text("Continue")'
-            ]
-            for selector in popup_selectors:
-                if page.locator(selector).count() > 0:
-                    page.locator(selector).first.click()
-                    page.wait_for_timeout(1000)
-                    break
-        except:
-            pass
-    
-    def handle_infinite_scroll(self, page):
-        """Handle infinite scroll and load more buttons"""
-        try:
-            # Try load more buttons first
-            load_selectors = [
-                'button:has-text("View More")',
-                'button:has-text("Load More")',
-                'button:has-text("Show More")',
-                'a:has-text("View More")'
-            ]
-            
+            load_more = ['button:has-text("View More")','button:has-text("Load More")','button:has-text("Show More")','a:has-text("View More")']
             for _ in range(3):
                 clicked = False
-                for selector in load_selectors:
-                    if page.locator(selector).count() > 0:
-                        try:
-                            page.locator(selector).first.click()
-                            page.wait_for_timeout(2000)
+                for s in load_more:
+                    try:
+                        if page.locator(s).count() > 0:
+                            page.locator(s).first.click()
+                            page.wait_for_timeout(1500)
                             clicked = True
                             break
-                        except:
-                            pass
-                
+                    except Exception:
+                        pass
                 if not clicked:
-                    # Scroll instead
                     page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                    page.wait_for_timeout(1500)
-        except:
+                    page.wait_for_timeout(1200)
+        except Exception:
             pass
-    
-    def navigate_next_page(self, page, current_page: int) -> bool:
-        """Navigate to next page"""
-        try:
-            next_selectors = [
-                f'a:has-text("{current_page + 1}")',
-                f'button:has-text("{current_page + 1}")',
-                'a:has-text("Next")',
-                'button:has-text("Next")',
-                'a[aria-label*="Next"]',
-                'button[aria-label*="Next"]'
-            ]
-            
-            for selector in next_selectors:
-                if page.locator(selector).count() > 0:
-                    page.locator(selector).first.click()
-                    page.wait_for_timeout(3000)
-                    logger.info(f"Navigated to page {current_page + 1}")
-                    return True
-        except Exception as e:
-            logger.debug(f"Pagination error: {e}")
-        
-        return False
-    
-    def check_all_boards(self):
-        """Check all job boards for new postings"""
-        for company, config in self.job_boards.items():
+
+    def next_page(self, page, current_page: int) -> bool:
+        sels = [
+            f'a:has-text("{current_page + 1}")', f'button:has-text("{current_page + 1}")',
+            'a:has-text("Next")','button:has-text("Next")','a[aria-label*="Next"]','button[aria-label*="Next"]'
+        ]
+        for s in sels:
             try:
-                jobs = self.scrape_job_board(company, config)
-                
-                # Update sent jobs tracking
-                if company not in self.sent_jobs:
-                    self.sent_jobs[company] = []
-                
-                for job_id, _ in jobs:
-                    if job_id not in self.sent_jobs[company]:
-                        self.sent_jobs[company].append(job_id)
-                
-                # Keep only recent sent jobs
-                self.sent_jobs[company] = self.sent_jobs[company][-200:]
-                
-                # Rate limiting
-                time.sleep(2)
-                
+                if page.locator(s).count() > 0:
+                    page.locator(s).first.click()
+                    page.wait_for_timeout(2500)
+                    return True
+            except Exception:
+                pass
+        return False
+
+    # ------------------------------
+    # Orchestrate scraping
+    # ------------------------------
+    def scrape_company(self, company: str, cfg: Dict):
+        method = cfg.get('method', 'playwright')
+        if method == 'greenhouse_api':
+            self.scrape_greenhouse_api(company, cfg['board_token'])
+        elif method == 'playwright':
+            self.scrape_playwright(company, cfg)
+        else:
+            # Placeholder for other integrations
+            self.scrape_playwright(company, cfg)
+
+    def collect_all(self):
+        for company, cfg in self.job_boards.items():
+            logger.info(f'=== {company} ===')
+            try:
+                self.scrape_company(company, cfg)
             except Exception as e:
-                logger.error(f"Error checking {company}: {e}")
-                continue
-    
-    def save_job_history(self):
-        """Save both job history and sent jobs"""
-        try:
-            if not self.gist_token:
-                logger.warning("No GIST_TOKEN found, skipping save")
-                return
-                
-            headers = {'Authorization': f'token {self.gist_token}'}
-            
-            # Find existing gist
-            response = requests.get('https://api.github.com/gists', headers=headers)
-            if response.status_code != 200:
-                return
-                
-            gists = response.json()
-            gist_id = None
-            
-            for gist in gists:
-                if 'job_history.json' in gist.get('files', {}):
-                    gist_id = gist['id']
-                    break
-            
-            if gist_id:
-                # Update both files
-                data = {
-                    'files': {
-                        'job_history.json': {
-                            'content': json.dumps(self.job_history, indent=2)
-                        },
-                        'sent_jobs.json': {
-                            'content': json.dumps(self.sent_jobs, indent=2)
-                        }
-                    }
-                }
-                requests.patch(f'https://api.github.com/gists/{gist_id}', headers=headers, json=data)
-                logger.info("Job history and sent jobs saved successfully")
-        except Exception as e:
-            logger.error(f"Error saving history: {e}")
-    
+                logger.error(f'{company} scrape error: {e}')
+            time.sleep(1.5)  # mild rate limit
+
+    # ------------------------------
+    # New-job filtering (24–48h window) and dedupe
+    # ------------------------------
+    def compute_new_jobs(self):
+        window_hours = self.NEW_WINDOW_HOURS
+
+        for company, jobs in self.found_jobs.items():
+            for key, info in jobs.items():
+                # Determine "posted time" to enforce age window
+                posted_at = parse_dt_safe(info.get('posted_at'))
+                if not posted_at:
+                    # Fallback: first_seen from history for this key
+                    hist = (self.job_history.get(company) or {}).get(key, {})
+                    posted_at = parse_dt_safe(hist.get('posted_at') or hist.get('first_seen'))
+                if not posted_at:
+                    # Last fallback: discovered_at in this run
+                    posted_at = parse_dt_safe(info.get('discovered_at'))
+
+                if not posted_at:
+                    # If still missing, skip (we can't confirm "new")
+                    continue
+
+                if hours_ago(posted_at) > window_hours:
+                    continue  # too old
+
+                # Skip if already emailed before
+                if key in (self.sent_jobs.get(company) or []):
+                    continue
+
+                self.candidate_new_jobs.append({
+                    'company': company,
+                    'key': key,
+                    'title': info.get('title'),
+                    'url': info.get('url'),
+                    'timestamp': posted_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
+                    'location': info.get('location','')
+                })
+
+        # De-duplicate conservatively by (company + title + url)
+        seen = set()
+        unique = []
+        for j in self.candidate_new_jobs:
+            sig = (j['company'], normalize_space(j['title']), j['url'])
+            if sig not in seen:
+                seen.add(sig)
+                unique.append(j)
+        self.candidate_new_jobs = unique
+
+    # ------------------------------
+    # Email
+    # ------------------------------
+    def build_email_html(self) -> str:
+        all_companies = sorted(self.job_boards.keys())
+        jobs_by_company: Dict[str, List[dict]] = {c: [] for c in all_companies}
+        for j in self.candidate_new_jobs:
+            jobs_by_company[j['company']].append(j)
+
+        html = f"""
+        <html>
+        <head>
+            <meta charset="utf-8" />
+            <style>
+                body {{ font-family: Arial, sans-serif; padding: 20px; }}
+                h2 {{ color: #2c3e50; }}
+                .summary {{ background: #e8f4f8; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+                .section {{ margin: 15px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background: #f9f9f9; }}
+                .company {{ font-weight: bold; color: #2c3e50; font-size: 16px; margin-bottom: 10px; }}
+                .job-title a {{ color: #34495e; text-decoration: none; }}
+                .job-title a:hover {{ text-decoration: underline; }}
+                .job-title {{ margin: 6px 0; }}
+                .no-jobs {{ color: #95a5a6; font-style: italic; margin: 5px 0; }}
+                .timestamp {{ color: #7f8c8d; font-size: 12px; padding-left: 6px; }}
+                .new-badge {{ background: #27ae60; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; margin-left:6px; }}
+            </style>
+        </head>
+        <body>
+            <h2>🚀 New Job Postings Alert</h2>
+            <div class="summary">
+                <strong>Total new jobs: {len(self.candidate_new_jobs)}</strong><br>
+                Check time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}<br>
+                <span class="new-badge">NEW</span> = Posting created in the last {self.NEW_WINDOW_HOURS} hours
+            </div>
+        """
+        for company in all_companies:
+            company_url = self.job_boards[company]['url']
+            jobs = jobs_by_company.get(company, [])
+            if jobs:
+                html += f'<div class="section"><div class="company">🏢 {company} ({len(jobs)} NEW postings)</div>'
+                for j in jobs:
+                    loc_text = f" — {j['location']}" if j.get('location') else ''
+                    html += f'<div class="job-title">• <a href="{j["url"]}">{j["title"]}</a>{loc_text}<span class="new-badge">NEW</span><span class="timestamp">{j["timestamp"]}</span></div>'
+            else:
+                html += f'<div class="section"><div class="company">🏢 {company}</div><div class="no-jobs">No new job postings since last check</div>'
+            html += f'<div style="margin-top: 10px;"><a href="{company_url}">View all {company} jobs →</a></div></div>'
+        html += """
+            <hr>
+            <p style="color: #7f8c8d; font-size: 12px;">
+                Automated Job Board Monitor • Runs hourly via GitHub Actions • Data persisted to GitHub Gists
+            </p>
+        </body>
+        </html>
+        """
+        return html
+
     def send_email_notification(self):
-        """Send email notification for truly new jobs only"""
-        if not self.new_jobs:
-            logger.info("No new jobs found in this run")
-            return
-        
+        if not self.candidate_new_jobs:
+            logger.info("No truly NEW jobs to email.")
+            return False
         try:
-            # Remove duplicates
-            seen = set()
-            unique_jobs = []
-            for job in self.new_jobs:
-                key = f"{job['company']}_{job['job_title']}"
-                if key not in seen:
-                    seen.add(key)
-                    unique_jobs.append(job)
-            
-            if not unique_jobs:
-                logger.info("No unique new jobs to report")
-                return
-            
-            logger.info(f"Preparing to send email with {len(unique_jobs)} new jobs...")
-            
             msg = MIMEMultipart('alternative')
-            msg['Subject'] = f'🎯 {len(unique_jobs)} New Job Postings Found!'
+            msg['Subject'] = f'🎯 {len(self.candidate_new_jobs)} New Job Postings Found!'
             msg['From'] = self.gmail_user
-            msg['To'] = 'sororitytech@gmail.com'
-            
-            # Create HTML email body
-            html_body = f"""
-            <html>
-            <head>
-                <style>
-                    body {{ font-family: Arial, sans-serif; padding: 20px; }}
-                    h2 {{ color: #2c3e50; }}
-                    .summary {{ background: #e8f4f8; padding: 15px; border-radius: 5px; margin: 20px 0; }}
-                    .job {{ margin: 15px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background: #f9f9f9; }}
-                    .company {{ font-weight: bold; color: #2c3e50; font-size: 16px; margin-bottom: 10px; }}
-                    .job-title {{ color: #34495e; margin: 5px 0; padding-left: 20px; }}
-                    .no-jobs {{ color: #95a5a6; font-style: italic; margin: 5px 0; padding-left: 20px; }}
-                    .timestamp {{ color: #7f8c8d; font-size: 12px; }}
-                    a {{ color: #3498db; text-decoration: none; }}
-                    a:hover {{ text-decoration: underline; }}
-                    .new-badge {{ background: #27ae60; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; }}
-                </style>
-            </head>
-            <body>
-                <h2>🚀 New Job Postings Alert</h2>
-                <div class="summary">
-                    <strong>Total new jobs: {len(unique_jobs)}</strong><br>
-                    Check time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
-                    <span class="new-badge">NEW</span> = Job posting created since last check<br>
-                    <em>Note: Only showing jobs that were JUST posted</em>
-                </div>
-            """
-            
-            # Group jobs by company
-            jobs_by_company = {}
-            for job in unique_jobs:
-                if job['company'] not in jobs_by_company:
-                    jobs_by_company[job['company']] = []
-                jobs_by_company[job['company']].append(job)
-            
-            # Show ALL companies
-            all_companies = sorted(self.job_boards.keys())
-            
-            for company in all_companies:
-                jobs = jobs_by_company.get(company, [])
-                company_url = self.job_boards[company]['url']
-                
-                if jobs:
-                    html_body += f"""
-                    <div class="job">
-                        <div class="company">🏢 {company} ({len(jobs)} NEW positions)</div>
-                    """
-                    # Show ALL jobs, not limited
-                    for job in jobs:
-                        location = job.get('location', '')
-                        location_text = f" - {location}" if location else ""
-                        html_body += f"""
-                        <div class="job-title">• {job['job_title']}{location_text} <span class="new-badge">NEW</span></div>
-                        """
-                else:
-                    html_body += f"""
-                    <div class="job">
-                        <div class="company">🏢 {company}</div>
-                        <div class="no-jobs">No new job postings since last check</div>
-                    """
-                
-                html_body += f"""
-                    <div style="margin-top: 10px;"><a href="{company_url}">View All {company} Jobs →</a></div>
-                </div>
-                """
-            
-            html_body += """
-                <hr>
-                <p style="color: #7f8c8d; font-size: 12px;">
-                    Automated Job Board Monitor<br>
-                    Checking: Every hour | Companies: 18<br>
-                    Apply within 24 hours for best results!
-                </p>
-            </body>
-            </html>
-            """
-            
-            part = MIMEText(html_body, 'html')
-            msg.attach(part)
-            
-            # Send email
-            logger.info("Connecting to Gmail SMTP server...")
+            msg['To'] = self.gmail_user  # send to self
+
+            html_body = self.build_email_html()
+            msg.attach(MIMEText(html_body, 'html'))
+
             with smtplib.SMTP('smtp.gmail.com', 587) as server:
                 server.starttls()
                 server.login(self.gmail_user, self.gmail_password)
                 server.send_message(msg)
-            
-            logger.info(f"✅ Email sent successfully with {len(unique_jobs)} new jobs!")
-            
+
+            logger.info(f"✅ Email sent with {len(self.candidate_new_jobs)} job(s).")
+            return True
         except Exception as e:
-            logger.error(f"❌ Error sending email: {e}")
-    
+            logger.error(f"❌ Email send failed: {e}")
+            return False
+
+    # ------------------------------
+    # Run
+    # ------------------------------
     def run(self):
-        """Main execution method"""
         logger.info("="*50)
         logger.info("Starting Job Board Monitor")
-        logger.info(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Time (UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"Monitoring {len(self.job_boards)} companies")
         logger.info("="*50)
-        
-        # Check all boards
-        self.check_all_boards()
-        
-        # Send email if new jobs found
-        if self.new_jobs:
-            logger.info(f"Total new jobs found: {len(self.new_jobs)}")
-            self.send_email_notification()
-        else:
-            logger.info("No new jobs found in this run")
-        
-        # Save updated history
-        self.save_job_history()
-        
-        logger.info("Job Board Monitor completed successfully!")
+
+        # 1) Scrape
+        self.collect_all()
+
+        # 2) Compute NEW-within-window and not previously sent
+        self.compute_new_jobs()
+
+        # 3) Email (only if we truly have brand-new jobs)
+        emailed = self.send_email_notification()
+
+        # 4) Persist: save history always; update sent_jobs ONLY after successful email
+        if emailed:
+            for j in self.candidate_new_jobs:
+                company = j['company']
+                key = j['key']
+                self.sent_jobs.setdefault(company, [])
+                if key not in self.sent_jobs[company]:
+                    self.sent_jobs[company].append(key)
+                    # Trim to recent N
+                    self.sent_jobs[company] = self.sent_jobs[company][-400:]
+
+        self.save_gist_files()
+
+        logger.info("Job Board Monitor completed.")
         logger.info("="*50)
 
+
 if __name__ == "__main__":
-    monitor = JobBoardMonitor()
-    monitor.run()
+    JobBoardMonitor().run()
