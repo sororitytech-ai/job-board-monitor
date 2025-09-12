@@ -5,12 +5,11 @@ import hashlib
 import smtplib
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Optional
 import requests
-from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 # ==============================
@@ -37,7 +36,6 @@ def parse_dt_safe(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
     try:
-        # handle common formats incl. ...Z
         if s.endswith('Z'):
             s = s[:-1] + '+00:00'
         return datetime.fromisoformat(s)
@@ -58,7 +56,7 @@ def normalize_space(s: str) -> str:
 # Core class
 # ==============================
 class JobBoardMonitor:
-    NEW_WINDOW_HOURS = 48  # include only postings within last 24–48h; we use 48h to be safe
+    NEW_WINDOW_HOURS = 48  # include only postings within last 24–48h; use 48h window
 
     def __init__(self):
         self.gmail_user = os.environ.get('GMAIL_USER')
@@ -69,13 +67,16 @@ class JobBoardMonitor:
         self.found_jobs: Dict[str, Dict[str, dict]] = {}  # per-run catalog of *all* jobs discovered
         self.candidate_new_jobs: List[dict] = []          # after filtering + age-window
 
-        # Company configurations
+        # Company configurations (selectors tightened; fallbacks added)
         self.job_boards = {
             'Google': {
                 'url': 'https://www.google.com/about/careers/applications/jobs/results/?location=United%20States&sort_by=date&q=product%2C%20program%2C%20project',
                 'method': 'playwright',
-                'selectors': ['a.gc-card__title-link', 'li.gc-card a[href*="/jobs/results"]'],
-                'wait_for': 8000,
+                'selectors': [
+                    'a.gc-card__title-link',
+                    'div[jsname] a[href*="/jobs/results/"]'
+                ],
+                'wait_for': 12000,
                 'scroll': True,
                 'pagination': True
             },
@@ -94,7 +95,10 @@ class JobBoardMonitor:
             'Wing': {
                 'url': 'https://wing.com/careers',
                 'method': 'playwright',
-                'selectors': ['a[href*="/careers/"] h3', 'a[href*="/careers/roles/"]'],
+                'selectors': [
+                    'a[href*="/careers/roles/"] h3',
+                    'a[href*="/careers/roles/"] .c-card__title'
+                ],
                 'wait_for': 6000,
                 'scroll': True
             },
@@ -108,8 +112,10 @@ class JobBoardMonitor:
             'Apple': {
                 'url': 'https://jobs.apple.com/en-us/search?sort=newest&key=Product%25252C%252520Program%25252C%252520Project&location=united-states-USA',
                 'method': 'playwright',
-                'selectors': ['a[id*="job-link"]', 'td.table-col-1 a[id]'],
-                'wait_for': 8000,
+                'selectors': [
+                    'table#tblResultSet td[class*="table-col-1"] a[id*="job-link"]'
+                ],
+                'wait_for': 9000,
                 'scroll': True,
                 'pagination': True
             },
@@ -122,8 +128,14 @@ class JobBoardMonitor:
             },
             'Netflix': {
                 'url': 'https://explore.jobs.netflix.net/careers?domain=netflix.com&sort_by=new',
-                'method': 'greenhouse_api_like',
-                'note': 'Netflix Explore (GH-like JSON behind site). Fallback: treat as scraped links.'
+                'method': 'playwright',  # fallback to scraping; GH-like JSON is not public
+                'selectors': [
+                    'a[href*="/careers/jobs/"] h3',
+                    'a[data-testid="job-card"] h3'
+                ],
+                'wait_for': 8000,
+                'scroll': True,
+                'pagination': True
             },
             'Anthropic': {
                 'url': 'https://boards.greenhouse.io/anthropic',
@@ -134,7 +146,7 @@ class JobBoardMonitor:
                 'url': 'https://www.tesla.com/careers/search/?region=5&site=US&type=1',
                 'method': 'playwright',
                 'selectors': ['tbody tr td:first-child a[href*="/careers/"]'],
-                'wait_for': 10000,
+                'wait_for': 15000,
                 'scroll': True,
                 'handle_cloudflare': True
             },
@@ -148,26 +160,38 @@ class JobBoardMonitor:
             'Meta': {
                 'url': 'https://www.metacareers.com/jobs',
                 'method': 'playwright',
-                'selectors': ['a[href*="/v2/jobs/"]'],
-                'wait_for': 8000,
+                'selectors': [
+                    'a[href^="/v2/jobs/"] div[role="heading"]',
+                    'a[href^="/v2/jobs/"] span'
+                ],
+                'wait_for': 9000,
                 'scroll': True,
                 'pagination': True
             },
             'SpaceX': {
                 'url': 'https://www.spacex.com/careers/jobs/',
-                'method': 'greenhouse_api',
-                'board_token': 'spacex'
+                'method': 'hybrid',  # try GH API then PW fallback
+                'board_token': 'spacex',
+                'selectors': [
+                    'a[href*="/careers/detail/"] h3',
+                    'a[href*="/careers/detail/"]'
+                ],
+                'wait_for': 7000,
+                'scroll': True
             },
             'Stripe': {
                 'url': 'https://stripe.com/jobs/search?office_locations=North+America--New+York',
                 'method': 'playwright',
-                'selectors': ['a.JobsListings__link'],
+                'selectors': ['a.JobsListings__link', 'a[href*="/jobs/positions/"]'],
                 'wait_for': 6000
             },
             'Uber': {
                 'url': 'https://www.uber.com/us/en/careers/list/?location=USA-New%20York-New%20York&location=USA-New%20York-Bronx',
                 'method': 'playwright',
-                'selectors': ['a[href*="/careers/"] h3'],
+                'selectors': [
+                    'a[data-baseweb="card"] h3',
+                    'a[href*="/careers/list/positions/"] h3'
+                ],
                 'wait_for': 8000,
                 'scroll': True,
                 'pagination': True
@@ -175,21 +199,32 @@ class JobBoardMonitor:
             'Two Sigma': {
                 'url': 'https://careers.twosigma.com/careers/OpenRoles',
                 'method': 'playwright',
-                'selectors': ['a[href*="JobDetail"] span', 'span.job-title'],
+                'selectors': ['a[href*="JobDetail"] .job-title', 'span.job-title'],
                 'wait_for': 6000,
                 'scroll': True
             },
             'Microsoft': {
                 'url': 'https://jobs.careers.microsoft.com/global/en/search?q=%22product%22%20OR%20%22project%22%20OR%20%22program%22&lc=United%20States&et=Full-Time&l=en_us&pg=1&pgSz=20&o=Recent',
                 'method': 'playwright',
-                'selectors': ['h2[data-automation-id="jobTitle"]', 'span[data-automation-id="jobTitle"]'],
-                'wait_for': 6000,
+                'selectors': [
+                    'a[data-bi-name="jobTitleLink"]',
+                    'div.job-title a',
+                    'h2[data-automation-id="jobTitle"]',
+                    'span[data-automation-id="jobTitle"]'
+                ],
+                'wait_for': 7000,
                 'pagination': True
             },
             'OpenAI': {
                 'url': 'https://openai.com/careers/search/',
-                'method': 'greenhouse_api',
-                'board_token': 'openai'
+                'method': 'hybrid',  # try GH first, then PW
+                'board_token': 'openai',
+                'selectors': [
+                    'a[href*="/careers/jobs/"] h3',
+                    'a[href*="/careers/jobs/"] span'
+                ],
+                'wait_for': 8000,
+                'scroll': True,
             }
         }
 
@@ -210,7 +245,7 @@ class JobBoardMonitor:
                     files = g.get('files', {}) or {}
                     if 'job_history.json' in files and 'sent_jobs.json' in files:
                         return g['id']
-            # Create
+            # Create new gist
             payload = {
                 'description': 'Job Board Monitor History',
                 'public': False,
@@ -262,6 +297,8 @@ class JobBoardMonitor:
             pr = requests.patch(f'https://api.github.com/gists/{gist_id}', headers=self._auth_headers(), json=payload, timeout=20)
             if pr.status_code not in (200, 201):
                 logger.error(f'Gist save failed {pr.status_code}: {pr.text[:200]}')
+            else:
+                logger.info(f"Gist {gist_id} updated.")
         except Exception as e:
             logger.error(f'save_gist_files error: {e}')
 
@@ -279,13 +316,23 @@ class JobBoardMonitor:
             'view role', 'read more', 'all departments', 'all locations',
             'no positions available', 'load more', 'show more', 'view all',
             'sign in', 'log in', 'create account', 'subscribe', 'follow us',
-            'contact us', 'search results', 'filters', 'apply filters'
+            'contact us', 'search results', 'filters', 'apply filters',
+            # extra noise seen in real boards
+            'inside uber', 'view all jobs', 'browse jobs', 'global nav', 'site map',
+            'learn more', 'open positions', 'clear filters', 'reset filters',
+            'locations•', '+ locations', ' +', '•engineering', 'help / support'
         ]
         if any(s in t for s in junk_substrings):
             return True
 
-        single_word_buckets = {'engineering','sales','marketing','design','global','meta','facebook','instagram','careers','jobs'}
-        if ' ' not in t and t in single_word_buckets:
+        # drop heavy UI strings with separators but no role words
+        if '•' in t and not any(w in t for w in [
+            'engineer','manager','product','program','project','designer','director','analyst','scientist','lead','pm'
+        ]):
+            return True
+
+        # drop single-word headings
+        if len(t.split()) == 1 and t in {'global','careers','jobs','teams','about','meta','facebook','instagram'}:
             return True
 
         # Must include at least one job-ish keyword
@@ -297,18 +344,11 @@ class JobBoardMonitor:
         return False
 
     # ------------------------------
-    # Relevance
+    # Relevance (relaxed to title-only to improve coverage)
     # ------------------------------
     def is_relevant_job(self, title: str, location: str = '') -> bool:
-        title_l = (title or '').lower()
-        if not any(k in title_l for k in ['product','program','project']):
-            return False
-        if location:
-            us_locs = ['united states','usa','us','new york','ny','remote','seattle','mountain view',
-                       'austin','boston','chicago','los angeles','sf','san francisco']
-            if not any(loc in location.lower() for loc in us_locs):
-                return False
-        return True
+        t = (title or '').lower()
+        return any(k in t for k in ['product', 'program', 'project'])
 
     # ------------------------------
     # Job key & storage
@@ -339,18 +379,19 @@ class JobBoardMonitor:
             }
 
     # ------------------------------
-    # API scrapers
+    # Greenhouse API
     # ------------------------------
-    def scrape_greenhouse_api(self, company: str, board_token: str):
+    def scrape_greenhouse_api(self, company: str, board_token: str) -> int:
+        count = 0
         try:
             jobs_url = f'https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs'
             r = requests.get(jobs_url, timeout=20)
             if r.status_code != 200:
                 logger.warning(f'{company} GH API {r.status_code}')
-                return
+                return 0
 
             for j in r.json().get('jobs', []):
-                title = j.get('title', '').strip()
+                title = (j.get('title') or '').strip()
                 location = (j.get('location', {}) or {}).get('name', '')
                 if not self.is_relevant_job(title, location):
                     continue
@@ -360,13 +401,16 @@ class JobBoardMonitor:
 
                 key = self.make_job_key(company, title, absolute_url, external_id)
                 self.record_discovery(company, key, title, absolute_url, posted_at, location)
+                count += 1
         except Exception as e:
             logger.error(f'{company} GH API error: {e}')
+        return count
 
     # ------------------------------
-    # Playwright scraper
+    # Playwright scraping
     # ------------------------------
-    def scrape_playwright(self, company: str, config: Dict):
+    def scrape_playwright(self, company: str, config: Dict) -> int:
+        added = 0
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(
@@ -394,7 +438,7 @@ class JobBoardMonitor:
                     if config.get('scroll'):
                         self.infinite_scroll(page)
 
-                    found = False
+                    found_any = False
                     for sel in config.get('selectors', []):
                         try:
                             els = page.locator(sel).all()
@@ -402,7 +446,7 @@ class JobBoardMonitor:
                             els = []
                         if not els:
                             continue
-                        found = True
+                        found_any = True
                         for el in els:
                             raw_text = normalize_space(el.text_content() or '')
                             href = None
@@ -416,15 +460,19 @@ class JobBoardMonitor:
                             if self.is_junk_text(raw_text):
                                 continue
 
-                            title = raw_text[:160]
+                            title = raw_text[:200]
                             url = href if href and href.startswith('http') else config['url']
                             key = self.make_job_key(company, title, url, None)
-                            # No reliable 'posted_at' from scraped UIs -> defer to first_seen
+                            # No reliable 'posted_at' from scraped UIs -> defer to first_seen for freshness window
+                            before = len(self.found_jobs.get(company, {}))
                             self.record_discovery(company, key, title, url, posted_at=None)
+                            after = len(self.found_jobs.get(company, {}))
+                            if after > before:
+                                added += 1
 
                         break  # stop after first selector that yielded results
 
-                    if not found:
+                    if not found_any:
                         break
 
                     if config.get('pagination') and not self.next_page(page, pages_checked):
@@ -433,6 +481,7 @@ class JobBoardMonitor:
                 browser.close()
         except Exception as e:
             logger.error(f'{company} Playwright error: {e}')
+        return added
 
     def dismiss_popups(self, page):
         sels = [
@@ -484,17 +533,33 @@ class JobBoardMonitor:
         return False
 
     # ------------------------------
-    # Orchestrate scraping
+    # Orchestrate scraping with fallbacks
     # ------------------------------
     def scrape_company(self, company: str, cfg: Dict):
         method = cfg.get('method', 'playwright')
+        added = 0
+
         if method == 'greenhouse_api':
-            self.scrape_greenhouse_api(company, cfg['board_token'])
+            added = self.scrape_greenhouse_api(company, cfg['board_token'])
+
         elif method == 'playwright':
-            self.scrape_playwright(company, cfg)
+            added = self.scrape_playwright(company, cfg)
+
+        elif method == 'hybrid':
+            # Try GH API first; if nothing added, try Playwright fallback (if selectors exist)
+            gh_added = 0
+            if 'board_token' in cfg:
+                gh_added = self.scrape_greenhouse_api(company, cfg['board_token'])
+            added += gh_added
+            if gh_added == 0 and cfg.get('selectors'):
+                logger.info(f'{company}: GH API yielded 0 — trying Playwright fallback.')
+                added += self.scrape_playwright(company, cfg)
+
         else:
-            # Placeholder for other integrations
-            self.scrape_playwright(company, cfg)
+            # Default to Playwright
+            added = self.scrape_playwright(company, cfg)
+
+        logger.info(f'{company}: discovered {added} items this run.')
 
     def collect_all(self):
         for company, cfg in self.job_boards.items():
@@ -503,7 +568,7 @@ class JobBoardMonitor:
                 self.scrape_company(company, cfg)
             except Exception as e:
                 logger.error(f'{company} scrape error: {e}')
-            time.sleep(1.5)  # mild rate limit
+            time.sleep(1.2)  # gentle rate limit
 
     # ------------------------------
     # New-job filtering (24–48h window) and dedupe
@@ -543,7 +608,7 @@ class JobBoardMonitor:
                     'location': info.get('location','')
                 })
 
-        # De-duplicate conservatively by (company + title + url)
+        # De-duplicate by (company + title + url)
         seen = set()
         unique = []
         for j in self.candidate_new_jobs:
@@ -620,6 +685,14 @@ class JobBoardMonitor:
             msg['To'] = self.gmail_user  # send to self
 
             html_body = self.build_email_html()
+
+            # Save the rendered email to logs so it appears in Actions artifacts
+            try:
+                with open('logs/latest_email.html', 'w', encoding='utf-8') as f:
+                    f.write(html_body)
+            except Exception:
+                pass
+
             msg.attach(MIMEText(html_body, 'html'))
 
             with smtplib.SMTP('smtp.gmail.com', 587) as server:
@@ -643,7 +716,7 @@ class JobBoardMonitor:
         logger.info(f"Monitoring {len(self.job_boards)} companies")
         logger.info("="*50)
 
-        # 1) Scrape
+        # 1) Scrape all boards (with GH→PW fallbacks where configured)
         self.collect_all()
 
         # 2) Compute NEW-within-window and not previously sent
@@ -660,8 +733,8 @@ class JobBoardMonitor:
                 self.sent_jobs.setdefault(company, [])
                 if key not in self.sent_jobs[company]:
                     self.sent_jobs[company].append(key)
-                    # Trim to recent N
-                    self.sent_jobs[company] = self.sent_jobs[company][-400:]
+                    # Trim to recent N to keep gist small
+                    self.sent_jobs[company] = self.sent_jobs[company][-500:]
 
         self.save_gist_files()
 
