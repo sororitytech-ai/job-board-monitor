@@ -16,11 +16,12 @@ permissions:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    # Pin to 22.04 so Playwright's system deps match (avoids libasound2t64 issue on 24.04)
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
 
     env:
-      # These are populated from your repo/org secrets
+      # Populated from your repo/org secrets
       GMAIL_USER: ${{ secrets.GMAIL_USER }}
       GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
       GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
@@ -44,8 +45,8 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Install Playwright browsers (Chromium) + system deps
         run: |
